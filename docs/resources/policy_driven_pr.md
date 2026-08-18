@@ -101,6 +101,7 @@ resource "stepsecurity_policy_driven_pr" "repo_level_config" {
       update_existing_configuration = false
       config                        = "- name: Harden the runner (Audit all outbound calls)\n  uses: step-security/custom-agent@v2\n  with:\n    egress-policy: audit\n    allowed-endpoints: >\n      github.com:443\n"
       target_runner_labels          = ["ubuntu-latest", "macos-latest"]
+      exempt_runner_labels          = ["gpu-*", "self-hosted"]
     }
   }
 }
@@ -210,6 +211,7 @@ Optional:
 Optional:
 
 - `config` (String) YAML string configuring the harden runner.
+- `exempt_runner_labels` (List of String) List of runner labels to exclude from the harden runner config. Jobs whose runner labels match any of these patterns are skipped. Supports glob wildcards (for example, "gpu-*"). Takes precedence over target_runner_labels.
 - `target_runner_labels` (List of String) List of runner labels to apply the harden runner config to. When non-empty, skip_harden_runner is automatically set to true internally.
 - `update_existing_configuration` (Boolean) When enabled, removes existing harden runner configurations not in the config.
 

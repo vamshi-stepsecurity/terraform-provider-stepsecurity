@@ -86,6 +86,7 @@ resource "stepsecurity_policy_driven_pr" "repo_level_config" {
       update_existing_configuration = false
       config                        = "- name: Harden the runner (Audit all outbound calls)\n  uses: step-security/custom-agent@v2\n  with:\n    egress-policy: audit\n    allowed-endpoints: >\n      github.com:443\n"
       target_runner_labels          = ["ubuntu-latest", "macos-latest"]
+      exempt_runner_labels          = ["gpu-*", "self-hosted"]
     }
   }
 }

@@ -96,10 +96,11 @@ type DependabotConfig struct {
 }
 
 type HardenRunnerConfig struct {
-	Config           string   `json:"config"`
-	Subtractive      bool     `json:"subtractive"`
-	SkipHardenRunner bool     `json:"skipHardenRunner"`
-	RunnerLabels     []string `json:"runnerLabels"`
+	Config             string   `json:"config"`
+	Subtractive        bool     `json:"subtractive"`
+	SkipHardenRunner   bool     `json:"skipHardenRunner"`
+	RunnerLabels       []string `json:"runnerLabels"`
+	ExemptRunnerLabels []string `json:"exemptRunnerLabels,omitempty"`
 }
 
 type featureConfigResponse struct {
