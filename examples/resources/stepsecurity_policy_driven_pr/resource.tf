@@ -85,8 +85,8 @@ resource "stepsecurity_policy_driven_pr" "repo_level_config" {
     harden_runner_config = {
       update_existing_configuration = false
       config                        = "- name: Harden the runner (Audit all outbound calls)\n  uses: step-security/custom-agent@v2\n  with:\n    egress-policy: audit\n    allowed-endpoints: >\n      github.com:443\n"
-      target_runner_labels          = ["ubuntu-latest", "macos-latest"]
-      exempt_runner_labels          = ["gpu-*", "self-hosted"]
+      target_runner_labels          = ["ubuntu-latest", "macos-latest"] # only add harden-runner to jobs on these runners
+      exempt_runner_labels          = ["gpu-*", "self-hosted"]          # skip jobs on these runners (supports globs, takes precedence)
     }
   }
 }
