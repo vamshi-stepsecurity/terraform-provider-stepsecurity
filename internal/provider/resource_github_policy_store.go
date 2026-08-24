@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
@@ -20,9 +21,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &githubPolicyStoreResource{}
-	_ resource.ResourceWithConfigure   = &githubPolicyStoreResource{}
-	_ resource.ResourceWithImportState = &githubPolicyStoreResource{}
+	_ resource.Resource                   = &githubPolicyStoreResource{}
+	_ resource.ResourceWithConfigure      = &githubPolicyStoreResource{}
+	_ resource.ResourceWithImportState    = &githubPolicyStoreResource{}
+	_ resource.ResourceWithValidateConfig = &githubPolicyStoreResource{}
 )
 
 // NewOrderResource is a helper function to simplify the provider implementation.
@@ -76,6 +78,18 @@ func (r *githubPolicyStoreResource) Schema(_ context.Context, _ resource.SchemaR
 					),
 				),
 				Description: "List of allowed endpoints. This specifies list of enpoints to allow when egress policy is set to 'block' mode",
+			},
+			"denied_endpoints": schema.SetAttribute{
+				ElementType: types.StringType,
+				Optional:    true,
+				Computed:    true,
+				Default: setdefault.StaticValue(
+					types.SetValueMust(
+						types.StringType,
+						[]attr.Value{},
+					),
+				),
+				Description: "Set of denied endpoints. This specifies endpoints to deny when egress policy is set to 'block' mode. Cannot be set together with allowed_endpoints.",
 			},
 			"disable_telemetry": schema.BoolAttribute{
 				Optional:    true,
@@ -151,12 +165,45 @@ func (r *githubPolicyStoreResource) Configure(ctx context.Context, req resource.
 	r.client = client
 }
 
+// ValidateConfig implements resource.ResourceWithValidateConfig.
+func (r *githubPolicyStoreResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var model githubPolicyStoreModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &model)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Defer validation until both are fully known — avoids erroring on
+	// partially-unknown config (e.g. values derived from other resources).
+	if model.AllowedEndpoints.IsUnknown() || model.DeniedEndpoints.IsUnknown() {
+		return
+	}
+
+	allowedLen := 0
+	if !model.AllowedEndpoints.IsNull() {
+		allowedLen = len(model.AllowedEndpoints.Elements())
+	}
+	deniedLen := 0
+	if !model.DeniedEndpoints.IsNull() {
+		deniedLen = len(model.DeniedEndpoints.Elements())
+	}
+
+	if allowedLen > 0 && deniedLen > 0 {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("denied_endpoints"),
+			"Conflicting endpoint lists",
+			"`allowed_endpoints` and `denied_endpoints` cannot both be set. Use one or the other.",
+		)
+	}
+}
+
 type githubPolicyStoreModel struct {
 	ID                    types.String `tfsdk:"id"`
 	Owner                 types.String `tfsdk:"owner"`
 	PolicyName            types.String `tfsdk:"policy_name"`
 	EgressPolicy          types.String `tfsdk:"egress_policy"`
 	AllowedEndpoints      types.List   `tfsdk:"allowed_endpoints"`
+	DeniedEndpoints       types.Set    `tfsdk:"denied_endpoints"`
 	DisableTelemetry      types.Bool   `tfsdk:"disable_telemetry"`
 	DisableSudo           types.Bool   `tfsdk:"disable_sudo"`
 	DisableFileMonitoring types.Bool   `tfsdk:"disable_file_monitoring"`
@@ -342,12 +389,21 @@ func (r *githubPolicyStoreResource) updateGitHubPolicyStorePolicyState(policy *s
 		allowedEndpoints = append(allowedEndpoints, types.StringValue(endpoint))
 	}
 
+	var deniedEndpoints []attr.Value
+	for _, endpoint := range policy.DeniedEndpoints {
+		deniedEndpoints = append(deniedEndpoints, types.StringValue(endpoint))
+	}
+
 	state.ID = types.StringValue(policy.Owner + ":::" + policy.PolicyName)
 	state.Owner = types.StringValue(policy.Owner)
 	state.PolicyName = types.StringValue(policy.PolicyName)
 	state.AllowedEndpoints = types.ListValueMust(
 		types.StringType,
 		allowedEndpoints,
+	)
+	state.DeniedEndpoints = types.SetValueMust(
+		types.StringType,
+		deniedEndpoints,
 	)
 	state.EgressPolicy = types.StringValue(policy.EgressPolicy)
 	state.DisableTelemetry = types.BoolValue(policy.DisableTelemetry)
@@ -383,6 +439,11 @@ func (r *githubPolicyStoreResource) getGitHubPolicyStorePolicy(ctx context.Conte
 		allowedEndpoints = append(allowedEndpoints, ep.(types.String).ValueString())
 	}
 
+	var deniedEndpoints []string
+	for _, ep := range plan.DeniedEndpoints.Elements() {
+		deniedEndpoints = append(deniedEndpoints, ep.(types.String).ValueString())
+	}
+
 	var lockdownConfig *stepsecurityapi.LockdownConfig
 	if !plan.Lockdown.IsNull() && !plan.Lockdown.IsUnknown() {
 		var lm lockdownConfigModel
@@ -409,6 +470,7 @@ func (r *githubPolicyStoreResource) getGitHubPolicyStorePolicy(ctx context.Conte
 		Owner:                 plan.Owner.ValueString(),
 		PolicyName:            plan.PolicyName.ValueString(),
 		AllowedEndpoints:      allowedEndpoints,
+		DeniedEndpoints:       deniedEndpoints,
 		EgressPolicy:          plan.EgressPolicy.ValueString(),
 		DisableTelemetry:      plan.DisableTelemetry.ValueBool(),
 		DisableSudo:           plan.DisableSudo.ValueBool(),
