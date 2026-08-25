@@ -89,7 +89,7 @@ func (r *githubPolicyStoreResource) Schema(_ context.Context, _ resource.SchemaR
 						[]attr.Value{},
 					),
 				),
-				Description: "Set of denied endpoints. This specifies endpoints to deny when egress policy is set to 'block' mode. Cannot be set together with allowed_endpoints.",
+				Description: "Set of denied endpoints (hostnames only, e.g. 'evil.example.com'). Unlike allowed_endpoints, a port is not required and has no effect if included. This specifies endpoints to deny when egress policy is set to 'block' mode. Cannot be set together with allowed_endpoints.",
 			},
 			"disable_telemetry": schema.BoolAttribute{
 				Optional:    true,

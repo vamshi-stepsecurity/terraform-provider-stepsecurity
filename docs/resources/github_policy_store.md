@@ -53,13 +53,15 @@ resource "stepsecurity_github_policy_store" "custom-policy" {
 
 # Policy with block mode and a deny list instead of an allow list.
 # denied_endpoints cannot be set together with allowed_endpoints.
+# Unlike allowed_endpoints, denied_endpoints does not take a port -
+# entries are hostnames only (e.g. "evil.example.com", not "evil.example.com:443").
 resource "stepsecurity_github_policy_store" "denied-endpoints-policy" {
   owner         = "test-organization"
   policy_name   = "denied-endpoints-policy"
   egress_policy = "block"
   denied_endpoints = [
-    "evil.example.com:443",
-    "malware.example.org:443"
+    "evil.example.com",
+    "malware.example.org"
   ]
 }
 
@@ -116,7 +118,7 @@ import {
 ### Optional
 
 - `allowed_endpoints` (List of String) List of allowed endpoints. This specifies list of enpoints to allow when egress policy is set to 'block' mode
-- `denied_endpoints` (Set of String) Set of denied endpoints. This specifies endpoints to deny when egress policy is set to 'block' mode. Cannot be set together with allowed_endpoints.
+- `denied_endpoints` (Set of String) Set of denied endpoints (hostnames only, e.g. 'evil.example.com'). Unlike allowed_endpoints, a port is not required and has no effect if included. This specifies endpoints to deny when egress policy is set to 'block' mode. Cannot be set together with allowed_endpoints.
 - `disable_file_monitoring` (Boolean) This disables file monitoring
 - `disable_sudo` (Boolean) This disables sudo access for HardenRunner agent
 - `disable_telemetry` (Boolean) This disables telemetry collection.
