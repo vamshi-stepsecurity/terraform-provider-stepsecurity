@@ -36,6 +36,20 @@ resource "stepsecurity_github_policy_store" "custom-policy" {
   ]
 }
 
+# Policy with block mode and a deny list instead of an allow list.
+# denied_endpoints cannot be set together with allowed_endpoints.
+# Unlike allowed_endpoints, denied_endpoints does not take a port -
+# entries are hostnames only (e.g. "evil.example.com", not "evil.example.com:443").
+resource "stepsecurity_github_policy_store" "denied-endpoints-policy" {
+  owner         = "test-organization"
+  policy_name   = "denied-endpoints-policy"
+  egress_policy = "block"
+  denied_endpoints = [
+    "evil.example.com",
+    "malware.example.org"
+  ]
+}
+
 # Policy with lockdown enabled for all detections
 resource "stepsecurity_github_policy_store" "lockdown-all" {
   owner         = "test-organization"
