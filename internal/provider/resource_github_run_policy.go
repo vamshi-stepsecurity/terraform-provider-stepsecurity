@@ -156,7 +156,7 @@ func (r *githubRunPolicyResource) Schema(_ context.Context, _ resource.SchemaReq
 					"allowed_actions": schema.MapAttribute{
 						ElementType:         types.StringType,
 						Optional:            true,
-						MarkdownDescription: "Map of allowed actions and their permissions (e.g., 'actions/checkout': 'allow').",
+						MarkdownDescription: "Map of allowed actions and their permissions (e.g., `\"actions/checkout\" = \"allow\"`). Keys support exact match (`actions/checkout@v4`), name-only match (`actions/checkout`, any ref), owner wildcard (`my-org/*`), and global wildcard (`*/*`, every action). Use `*/*` to allow all actions while still enforcing `require_pinned_actions`.",
 					},
 					"enable_harden_runner_policy": schema.BoolAttribute{
 						Optional:            true,
@@ -212,7 +212,7 @@ func (r *githubRunPolicyResource) Schema(_ context.Context, _ resource.SchemaReq
 					"actions_to_exempt_while_pinning": schema.SetAttribute{
 						ElementType:         types.StringType,
 						Optional:            true,
-						MarkdownDescription: "Set of actions exempt from pinning requirements. Supports exact match (e.g., 'actions/checkout'), name-only match, and owner wildcard (e.g., 'my-org/*').",
+						MarkdownDescription: "Set of actions exempt from pinning requirements. Supports exact match (e.g., `actions/checkout@v4`), name-only match (e.g., `actions/checkout`), and owner wildcard (e.g., `my-org/*`). The global wildcard `*/*` is **rejected** by the API here: it would exempt every action from pinning, leaving `require_pinned_actions` enabled but enforcing nothing. To allow any action while still requiring pins, put `*/*` in `allowed_actions` instead.",
 					},
 					"is_dry_run": schema.BoolAttribute{
 						Optional:            true,
