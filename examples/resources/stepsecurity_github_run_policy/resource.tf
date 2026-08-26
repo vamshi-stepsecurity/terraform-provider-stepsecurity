@@ -364,6 +364,27 @@ resource "stepsecurity_github_run_policy" "pinned_actions_policy" {
   }
 }
 
+# Allowed Actions Policy Example (pinning only, every action allowed)
+# require_pinned_actions is a sub-feature of the allowed actions policy, so
+# enable_action_policy must be true and the allow list is evaluated alongside it.
+# Use the global wildcard "*/*" to allow every action, leaving the pinning
+# requirement as the only thing this policy enforces.
+resource "stepsecurity_github_run_policy" "pinning_only_policy" {
+  owner     = "my-org"
+  name      = "Allowed Actions Policy - Pinning Only"
+  all_repos = true
+
+  policy_config = {
+    owner                  = "my-org"
+    name                   = "Allowed Actions Policy - Pinning Only"
+    enable_action_policy   = true
+    require_pinned_actions = true
+    allowed_actions = {
+      "*/*" = "allow"
+    }
+  }
+}
+
 # Allowed Actions Policy Example (dry_run, pinned actions enforcement)
 resource "stepsecurity_github_run_policy" "pinned_actions_policy_dry_run" {
   owner     = "my-org"

@@ -379,6 +379,27 @@ resource "stepsecurity_github_run_policy" "pinned_actions_policy" {
   }
 }
 
+# Allowed Actions Policy Example (pinning only, every action allowed)
+# require_pinned_actions is a sub-feature of the allowed actions policy, so
+# enable_action_policy must be true and the allow list is evaluated alongside it.
+# Use the global wildcard "*/*" to allow every action, leaving the pinning
+# requirement as the only thing this policy enforces.
+resource "stepsecurity_github_run_policy" "pinning_only_policy" {
+  owner     = "my-org"
+  name      = "Allowed Actions Policy - Pinning Only"
+  all_repos = true
+
+  policy_config = {
+    owner                  = "my-org"
+    name                   = "Allowed Actions Policy - Pinning Only"
+    enable_action_policy   = true
+    require_pinned_actions = true
+    allowed_actions = {
+      "*/*" = "allow"
+    }
+  }
+}
+
 # Allowed Actions Policy Example (dry_run, pinned actions enforcement)
 resource "stepsecurity_github_run_policy" "pinned_actions_policy_dry_run" {
   owner     = "my-org"
@@ -504,8 +525,8 @@ Required:
 
 Optional:
 
-- `actions_to_exempt_while_pinning` (Set of String) Set of actions exempt from pinning requirements. Supports exact match (e.g., 'actions/checkout'), name-only match, and owner wildcard (e.g., 'my-org/*').
-- `allowed_actions` (Map of String) Map of allowed actions and their permissions (e.g., 'actions/checkout': 'allow').
+- `actions_to_exempt_while_pinning` (Set of String) Set of actions exempt from pinning requirements. Supports exact match (e.g., `actions/checkout@v4`), name-only match (e.g., `actions/checkout`), and owner wildcard (e.g., `my-org/*`). The global wildcard `*/*` is **rejected** by the API here: it would exempt every action from pinning, leaving `require_pinned_actions` enabled but enforcing nothing. To allow any action while still requiring pins, put `*/*` in `allowed_actions` instead.
+- `allowed_actions` (Map of String) Map of allowed actions and their permissions (e.g., `"actions/checkout" = "allow"`). Keys support exact match (`actions/checkout@v4`), name-only match (`actions/checkout`, any ref), owner wildcard (`my-org/*`), and global wildcard (`*/*`, every action). Use `*/*` to allow all actions while still enforcing `require_pinned_actions`.
 - `allowed_runner_constraints` (Map of Set of String) Structured runs-on.com constraints permitted when `runs_on_mode` is `allowed`, keyed by dimension (e.g. `family`, `cpu`, `image`). Each key maps to the set of allowed values for that dimension: a `runs-on` token of the form `key=value` is allowed when the key is unconfigured, or when its value is in the set. Keys are lowercased server-side (use lowercase keys to avoid plan drift) and each key must have at least one value. Expression values are matched by their exact text (whitespace-insensitive), so the `runs-on` routing key itself can be pinned to the conventional expression.
 - `allowed_runner_labels` (Set of String) Set of plain runner labels permitted when `runs_on_mode` is `allowed` (e.g. `ubuntu-latest`). A job is allowed when its `runs-on` label matches an entry verbatim. Ignored in `disallowed` mode.
 - `block_job_container` (Boolean) Sub-feature of the Harden Runner policy. When true, targeted jobs that run entirely inside a job-level `container:` are blocked, because Harden Runner cannot monitor a fully containerized job on GitHub-hosted standard runners. Steps that use containers are unaffected. Only meaningful when `enable_harden_runner_policy` is true.
