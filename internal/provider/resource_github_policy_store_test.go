@@ -120,6 +120,26 @@ func TestAccGithubPolicyStoreResourceMinimal(t *testing.T) {
 	})
 }
 
+func TestAccGithubPolicyStoreResourceWithDeniedEndpoints(t *testing.T) {
+	res.Test(t, res.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []res.TestStep{
+			{
+				Config: testAccGithubPolicyStoreResourceConfigWithDeniedEndpoints("tf-acc-test", "test-policy-denied"),
+				Check: res.ComposeAggregateTestCheckFunc(
+					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "owner", "tf-acc-test"),
+					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "policy_name", "test-policy-denied"),
+					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "egress_policy", "block"),
+					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "denied_endpoints.#", "2"),
+					res.TestCheckTypeSetElemAttr("stepsecurity_github_policy_store.test", "denied_endpoints.*", "evil.example.com:443"),
+					res.TestCheckTypeSetElemAttr("stepsecurity_github_policy_store.test", "denied_endpoints.*", "malware.example.org:443"),
+				),
+			},
+		},
+	})
+}
+
 func TestGithubPolicyStoreResource_Metadata(t *testing.T) {
 	t.Parallel()
 
@@ -178,7 +198,7 @@ func TestGithubPolicyStoreResource_Schema(t *testing.T) {
 
 	// Test required attributes
 	expectedAttrs := []string{
-		"id", "owner", "policy_name", "egress_policy", "allowed_endpoints",
+		"id", "owner", "policy_name", "egress_policy", "allowed_endpoints", "denied_endpoints",
 		"disable_telemetry", "disable_sudo", "disable_file_monitoring",
 	}
 	for _, attr := range expectedAttrs {
@@ -353,6 +373,120 @@ func TestGithubPolicyStoreResource_ClientInteraction(t *testing.T) {
 	}
 }
 
+func TestGithubPolicyStoreResource_ValidateConfig(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name             string
+		allowedEndpoints types.List
+		deniedEndpoints  types.Set
+		expectedError    bool
+	}{
+		{
+			name:             "neither_set",
+			allowedEndpoints: types.ListNull(types.StringType),
+			deniedEndpoints:  types.SetNull(types.StringType),
+			expectedError:    false,
+		},
+		{
+			name: "only_allowed_set",
+			allowedEndpoints: types.ListValueMust(
+				types.StringType,
+				[]attr.Value{types.StringValue("github.com:443")},
+			),
+			deniedEndpoints: types.SetNull(types.StringType),
+			expectedError:   false,
+		},
+		{
+			name:             "only_denied_set",
+			allowedEndpoints: types.ListNull(types.StringType),
+			deniedEndpoints: types.SetValueMust(
+				types.StringType,
+				[]attr.Value{types.StringValue("evil.example.com:443")},
+			),
+			expectedError: false,
+		},
+		{
+			name: "both_empty",
+			allowedEndpoints: types.ListValueMust(
+				types.StringType,
+				[]attr.Value{},
+			),
+			deniedEndpoints: types.SetValueMust(
+				types.StringType,
+				[]attr.Value{},
+			),
+			expectedError: false,
+		},
+		{
+			name: "both_set",
+			allowedEndpoints: types.ListValueMust(
+				types.StringType,
+				[]attr.Value{types.StringValue("github.com:443")},
+			),
+			deniedEndpoints: types.SetValueMust(
+				types.StringType,
+				[]attr.Value{types.StringValue("evil.example.com:443")},
+			),
+			expectedError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			r := &githubPolicyStoreResource{}
+
+			schemaResp := &resource.SchemaResponse{}
+			r.Schema(ctx, resource.SchemaRequest{}, schemaResp)
+			if schemaResp.Diagnostics.HasError() {
+				t.Fatalf("unexpected schema diagnostics: %v", schemaResp.Diagnostics)
+			}
+
+			model := githubPolicyStoreModel{
+				ID:                    types.StringValue("test-org:::test-policy"),
+				Owner:                 types.StringValue("test-org"),
+				PolicyName:            types.StringValue("test-policy"),
+				EgressPolicy:          types.StringValue("block"),
+				AllowedEndpoints:      tc.allowedEndpoints,
+				DeniedEndpoints:       tc.deniedEndpoints,
+				DisableTelemetry:      types.BoolValue(false),
+				DisableSudo:           types.BoolValue(false),
+				DisableFileMonitoring: types.BoolValue(false),
+				Lockdown: types.ObjectNull(map[string]attr.Type{
+					"enabled":                   types.BoolType,
+					"privileged_container":      types.BoolType,
+					"runner_worker_memory_read": types.BoolType,
+					"reverse_shell":             types.BoolType,
+				}),
+			}
+
+			plan := tfsdk.Plan{Schema: schemaResp.Schema}
+			diags := plan.Set(ctx, model)
+			if diags.HasError() {
+				t.Fatalf("unexpected diagnostics building config: %v", diags)
+			}
+
+			config := tfsdk.Config{Raw: plan.Raw, Schema: schemaResp.Schema}
+			resp := &resource.ValidateConfigResponse{}
+
+			r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: config}, resp)
+
+			if tc.expectedError {
+				if !resp.Diagnostics.HasError() {
+					t.Error("Expected error but got none")
+				}
+			} else {
+				if resp.Diagnostics.HasError() {
+					t.Errorf("Expected no error but got: %v", resp.Diagnostics)
+				}
+			}
+		})
+	}
+}
+
 func TestGithubPolicyStoreResource_ImportState(t *testing.T) {
 	t.Parallel()
 
@@ -429,6 +563,9 @@ func TestGithubPolicyStoreResource_ImportState(t *testing.T) {
 							"allowed_endpoints": tftypes.List{
 								ElementType: tftypes.String,
 							},
+							"denied_endpoints": tftypes.Set{
+								ElementType: tftypes.String,
+							},
 							"disable_telemetry":       tftypes.Bool,
 							"disable_sudo":            tftypes.Bool,
 							"disable_file_monitoring": tftypes.Bool,
@@ -494,6 +631,10 @@ func TestGithubPolicyStoreResource_UpdateState(t *testing.T) {
 					types.StringType,
 					[]attr.Value{types.StringValue("github.com:443")},
 				),
+				DeniedEndpoints: types.SetValueMust(
+					types.StringType,
+					[]attr.Value{},
+				),
 				DisableTelemetry:      types.BoolValue(false),
 				DisableSudo:           types.BoolValue(false),
 				DisableFileMonitoring: types.BoolValue(false),
@@ -523,9 +664,40 @@ func TestGithubPolicyStoreResource_UpdateState(t *testing.T) {
 						types.StringValue("registry.npmjs.org:443"),
 					},
 				),
+				DeniedEndpoints: types.SetValueMust(
+					types.StringType,
+					[]attr.Value{},
+				),
 				DisableTelemetry:      types.BoolValue(true),
 				DisableSudo:           types.BoolValue(true),
 				DisableFileMonitoring: types.BoolValue(true),
+			},
+		},
+		{
+			name: "policy_with_denied_endpoints",
+			policy: &stepsecurityapi.GitHubPolicyStorePolicy{
+				Owner:            "tf-acc-test",
+				PolicyName:       "test-policy-denied",
+				EgressPolicy:     "block",
+				AllowedEndpoints: []string{},
+				DeniedEndpoints:  []string{"evil.example.com:443", "malware.example.org:443"},
+			},
+			expected: githubPolicyStoreModel{
+				ID:           types.StringValue("tf-acc-test:::test-policy-denied"),
+				Owner:        types.StringValue("tf-acc-test"),
+				PolicyName:   types.StringValue("test-policy-denied"),
+				EgressPolicy: types.StringValue("block"),
+				AllowedEndpoints: types.ListValueMust(
+					types.StringType,
+					[]attr.Value{},
+				),
+				DeniedEndpoints: types.SetValueMust(
+					types.StringType,
+					[]attr.Value{
+						types.StringValue("evil.example.com:443"),
+						types.StringValue("malware.example.org:443"),
+					},
+				),
 			},
 		},
 	}
@@ -573,6 +745,11 @@ func TestGithubPolicyStoreResource_UpdateState(t *testing.T) {
 			if len(state.AllowedEndpoints.Elements()) != len(tc.expected.AllowedEndpoints.Elements()) {
 				t.Errorf("Expected %d allowed endpoints, got %d", len(tc.expected.AllowedEndpoints.Elements()), len(state.AllowedEndpoints.Elements()))
 			}
+
+			// Verify set elements count
+			if len(state.DeniedEndpoints.Elements()) != len(tc.expected.DeniedEndpoints.Elements()) {
+				t.Errorf("Expected %d denied endpoints, got %d", len(tc.expected.DeniedEndpoints.Elements()), len(state.DeniedEndpoints.Elements()))
+			}
 		})
 	}
 }
@@ -595,6 +772,10 @@ func TestGithubPolicyStoreResource_GetPolicy(t *testing.T) {
 					types.StringType,
 					[]attr.Value{types.StringValue("github.com:443")},
 				),
+				DeniedEndpoints: types.SetValueMust(
+					types.StringType,
+					[]attr.Value{},
+				),
 				DisableTelemetry:      types.BoolValue(false),
 				DisableSudo:           types.BoolValue(false),
 				DisableFileMonitoring: types.BoolValue(false),
@@ -604,6 +785,7 @@ func TestGithubPolicyStoreResource_GetPolicy(t *testing.T) {
 				PolicyName:            "test-policy",
 				EgressPolicy:          "audit",
 				AllowedEndpoints:      []string{"github.com:443"},
+				DeniedEndpoints:       []string{},
 				DisableTelemetry:      false,
 				DisableSudo:           false,
 				DisableFileMonitoring: false,
@@ -623,6 +805,10 @@ func TestGithubPolicyStoreResource_GetPolicy(t *testing.T) {
 						types.StringValue("registry.npmjs.org:443"),
 					},
 				),
+				DeniedEndpoints: types.SetValueMust(
+					types.StringType,
+					[]attr.Value{},
+				),
 				DisableTelemetry:      types.BoolValue(true),
 				DisableSudo:           types.BoolValue(true),
 				DisableFileMonitoring: types.BoolValue(true),
@@ -632,9 +818,36 @@ func TestGithubPolicyStoreResource_GetPolicy(t *testing.T) {
 				PolicyName:            "test-policy",
 				EgressPolicy:          "block",
 				AllowedEndpoints:      []string{"github.com:443", "api.github.com:443", "registry.npmjs.org:443"},
+				DeniedEndpoints:       []string{},
 				DisableTelemetry:      true,
 				DisableSudo:           true,
 				DisableFileMonitoring: true,
+			},
+		},
+		{
+			name: "model_with_denied_endpoints",
+			model: githubPolicyStoreModel{
+				Owner:        types.StringValue("tf-acc-test"),
+				PolicyName:   types.StringValue("test-policy-denied"),
+				EgressPolicy: types.StringValue("block"),
+				AllowedEndpoints: types.ListValueMust(
+					types.StringType,
+					[]attr.Value{},
+				),
+				DeniedEndpoints: types.SetValueMust(
+					types.StringType,
+					[]attr.Value{
+						types.StringValue("evil.example.com:443"),
+						types.StringValue("malware.example.org:443"),
+					},
+				),
+			},
+			expected: &stepsecurityapi.GitHubPolicyStorePolicy{
+				Owner:            "tf-acc-test",
+				PolicyName:       "test-policy-denied",
+				EgressPolicy:     "block",
+				AllowedEndpoints: []string{},
+				DeniedEndpoints:  []string{"evil.example.com:443", "malware.example.org:443"},
 			},
 		},
 	}
@@ -665,6 +878,23 @@ func TestGithubPolicyStoreResource_GetPolicy(t *testing.T) {
 			for i, endpoint := range result.AllowedEndpoints {
 				if endpoint != tc.expected.AllowedEndpoints[i] {
 					t.Errorf("Expected endpoint %s at index %d, got %s", tc.expected.AllowedEndpoints[i], i, endpoint)
+				}
+			}
+
+			// Set ordering is not guaranteed, so compare membership rather than index.
+			if len(result.DeniedEndpoints) != len(tc.expected.DeniedEndpoints) {
+				t.Errorf("Expected %d denied endpoints, got %d", len(tc.expected.DeniedEndpoints), len(result.DeniedEndpoints))
+			}
+			for _, expectedEndpoint := range tc.expected.DeniedEndpoints {
+				found := false
+				for _, endpoint := range result.DeniedEndpoints {
+					if endpoint == expectedEndpoint {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected denied endpoint %s not found in result: %v", expectedEndpoint, result.DeniedEndpoints)
 				}
 			}
 
@@ -724,6 +954,21 @@ resource "stepsecurity_github_policy_store" "test" {
   disable_telemetry       = true
   disable_sudo            = true
   disable_file_monitoring = true
+}
+`, owner, policyName)
+}
+
+func testAccGithubPolicyStoreResourceConfigWithDeniedEndpoints(owner, policyName string) string {
+	return testProviderConfig() + fmt.Sprintf(`
+resource "stepsecurity_github_policy_store" "test" {
+  owner         = %[1]q
+  policy_name   = %[2]q
+  egress_policy = "block"
+
+  denied_endpoints = [
+    "evil.example.com:443",
+    "malware.example.org:443"
+  ]
 }
 `, owner, policyName)
 }

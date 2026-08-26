@@ -29,6 +29,7 @@ type GitHubPolicyStorePolicy struct {
 	Owner                 string             `json:"owner"`
 	PolicyName            string             `json:"policyName"`
 	AllowedEndpoints      []string           `json:"allowed_endpoints"`
+	DeniedEndpoints       []string           `json:"denied_endpoints,omitempty"`
 	EgressPolicy          string             `json:"egress_policy"`
 	DisableTelemetry      bool               `json:"disable_telemetry"`
 	DisableSudo           bool               `json:"disable_sudo"`
@@ -52,6 +53,7 @@ func (c *APIClient) CreateGitHubPolicyStorePolicy(ctx context.Context, policy *G
 		Owner:                 policy.Owner,
 		PolicyName:            policy.PolicyName,
 		AllowedEndpoints:      policy.AllowedEndpoints,
+		DeniedEndpoints:       policy.DeniedEndpoints,
 		EgressPolicy:          policy.EgressPolicy,
 		DisableTelemetry:      policy.DisableTelemetry,
 		DisableSudo:           policy.DisableSudo,
