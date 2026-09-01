@@ -11,6 +11,11 @@ type GitHubPRTemplate struct {
 	Summary       string   `json:"summary"`
 	CommitMessage string   `json:"commit_message"`
 	Labels        []string `json:"labels,omitempty"`
+	// BranchName is the template for the remediation PR branch name. It must
+	// contain the "{time}" placeholder, which the API replaces with a DDHHMM
+	// timestamp so each remediation gets a unique branch. Empty means the default
+	// branch name is used.
+	BranchName string `json:"branch_name,omitempty"`
 }
 
 func (c *APIClient) GetGitHubPRTemplate(ctx context.Context, owner string) (*GitHubPRTemplate, error) {
