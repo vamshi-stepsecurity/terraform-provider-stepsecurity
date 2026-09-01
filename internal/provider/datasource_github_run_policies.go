@@ -123,7 +123,7 @@ func (d *githubRunPoliciesDataSource) Schema(_ context.Context, _ datasource.Sch
 								"allowed_actions": schema.MapAttribute{
 									ElementType:         types.StringType,
 									Computed:            true,
-									MarkdownDescription: "Map of allowed actions and their permissions.",
+									MarkdownDescription: "Map of allowed actions and their permissions. Keys may be an exact ref (`actions/checkout@v4`), a name-only match (`actions/checkout`), an owner wildcard (`my-org/*`), or the global wildcard (`*/*`).",
 								},
 								"enable_harden_runner_policy": schema.BoolAttribute{
 									Computed:            true,
