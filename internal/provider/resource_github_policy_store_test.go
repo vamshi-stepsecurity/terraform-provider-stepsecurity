@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -131,6 +132,11 @@ func TestAccGithubPolicyStoreResourceWithDeniedEndpoints(t *testing.T) {
 					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "owner", "tf-acc-test"),
 					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "policy_name", "test-policy-denied"),
 					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "egress_policy", "block"),
+					// Regression check: allowed_endpoints must NOT fall back to its
+					// ["github.com:443"] default when denied_endpoints is configured
+					// instead, or the API rejects the request with "allowed_endpoints
+					// and denied_endpoints cannot both be present".
+					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "allowed_endpoints.#", "0"),
 					res.TestCheckResourceAttr("stepsecurity_github_policy_store.test", "denied_endpoints.#", "2"),
 					res.TestCheckTypeSetElemAttr("stepsecurity_github_policy_store.test", "denied_endpoints.*", "evil.example.com:443"),
 					res.TestCheckTypeSetElemAttr("stepsecurity_github_policy_store.test", "denied_endpoints.*", "malware.example.org:443"),
@@ -482,6 +488,119 @@ func TestGithubPolicyStoreResource_ValidateConfig(t *testing.T) {
 				if resp.Diagnostics.HasError() {
 					t.Errorf("Expected no error but got: %v", resp.Diagnostics)
 				}
+			}
+		})
+	}
+}
+
+// TestSuppressAllowedEndpointsDefaultWhenDeniedSetModifier_PlanModifyList
+// reproduces the customer-reported bug: a config that only sets
+// denied_endpoints (no allowed_endpoints) must not plan allowed_endpoints
+// as its ["github.com:443"] default, or the API rejects the request with
+// "allowed_endpoints and denied_endpoints cannot both be present".
+func TestSuppressAllowedEndpointsDefaultWhenDeniedSetModifier_PlanModifyList(t *testing.T) {
+	t.Parallel()
+
+	defaultAllowedEndpoints := types.ListValueMust(
+		types.StringType,
+		[]attr.Value{types.StringValue("github.com:443")},
+	)
+
+	testCases := []struct {
+		name              string
+		allowedEndpoints  types.List // config value for allowed_endpoints
+		deniedEndpoints   types.Set  // config value for denied_endpoints
+		startingPlanValue types.List // simulates the value Default already assigned
+		expectedPlanValue types.List
+	}{
+		{
+			name:              "denied_set_allowed_unset_in_config",
+			allowedEndpoints:  types.ListNull(types.StringType),
+			deniedEndpoints:   types.SetValueMust(types.StringType, []attr.Value{types.StringValue("registry.npmjs.org")}),
+			startingPlanValue: defaultAllowedEndpoints,
+			expectedPlanValue: types.ListValueMust(types.StringType, []attr.Value{}),
+		},
+		{
+			name:              "denied_unset_allowed_unset_in_config",
+			allowedEndpoints:  types.ListNull(types.StringType),
+			deniedEndpoints:   types.SetNull(types.StringType),
+			startingPlanValue: defaultAllowedEndpoints,
+			expectedPlanValue: defaultAllowedEndpoints,
+		},
+		{
+			name:              "denied_empty_allowed_unset_in_config",
+			allowedEndpoints:  types.ListNull(types.StringType),
+			deniedEndpoints:   types.SetValueMust(types.StringType, []attr.Value{}),
+			startingPlanValue: defaultAllowedEndpoints,
+			expectedPlanValue: defaultAllowedEndpoints,
+		},
+		{
+			name: "both_explicitly_configured",
+			allowedEndpoints: types.ListValueMust(
+				types.StringType,
+				[]attr.Value{types.StringValue("github.com:443")},
+			),
+			deniedEndpoints:   types.SetValueMust(types.StringType, []attr.Value{types.StringValue("registry.npmjs.org")}),
+			startingPlanValue: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("github.com:443")}),
+			expectedPlanValue: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("github.com:443")}),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			r := &githubPolicyStoreResource{}
+
+			schemaResp := &resource.SchemaResponse{}
+			r.Schema(ctx, resource.SchemaRequest{}, schemaResp)
+			if schemaResp.Diagnostics.HasError() {
+				t.Fatalf("unexpected schema diagnostics: %v", schemaResp.Diagnostics)
+			}
+
+			model := githubPolicyStoreModel{
+				ID:                    types.StringValue("test-org:::test-policy"),
+				Owner:                 types.StringValue("test-org"),
+				PolicyName:            types.StringValue("test-policy"),
+				EgressPolicy:          types.StringValue("audit"),
+				AllowedEndpoints:      tc.allowedEndpoints,
+				DeniedEndpoints:       tc.deniedEndpoints,
+				DisableTelemetry:      types.BoolValue(false),
+				DisableSudo:           types.BoolValue(false),
+				DisableFileMonitoring: types.BoolValue(false),
+				Lockdown: types.ObjectNull(map[string]attr.Type{
+					"enabled":                   types.BoolType,
+					"privileged_container":      types.BoolType,
+					"runner_worker_memory_read": types.BoolType,
+					"reverse_shell":             types.BoolType,
+				}),
+			}
+
+			plan := tfsdk.Plan{Schema: schemaResp.Schema}
+			diags := plan.Set(ctx, model)
+			if diags.HasError() {
+				t.Fatalf("unexpected diagnostics building config: %v", diags)
+			}
+			config := tfsdk.Config{Raw: plan.Raw, Schema: schemaResp.Schema}
+
+			modifier := suppressAllowedEndpointsDefaultWhenDeniedSetModifier{}
+			req := planmodifier.ListRequest{
+				ConfigValue: tc.allowedEndpoints,
+				Config:      config,
+			}
+			resp := &planmodifier.ListResponse{
+				PlanValue: tc.startingPlanValue,
+			}
+
+			modifier.PlanModifyList(ctx, req, resp)
+
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics)
+			}
+
+			if !resp.PlanValue.Equal(tc.expectedPlanValue) {
+				t.Errorf("expected plan value %v, got %v", tc.expectedPlanValue, resp.PlanValue)
 			}
 		})
 	}
