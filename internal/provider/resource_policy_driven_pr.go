@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	stepsecurityapi "github.com/step-security/terraform-provider-stepsecurity/internal/stepsecurity-api"
 
@@ -201,6 +202,22 @@ func (r *policyDrivenPRResource) Schema(_ context.Context, _ resource.SchemaRequ
 								[]attr.Value{},
 							),
 						),
+					},
+					"custom_precommit_config": schema.SingleNestedAttribute{
+						Optional:    true,
+						Description: "Provide a full .pre-commit-config.yaml verbatim instead of assembling it from update_precommit_file hooks. Mutually exclusive with update_precommit_file.",
+						Attributes: map[string]schema.Attribute{
+							"config": schema.StringAttribute{
+								Required:    true,
+								Description: "The full .pre-commit-config.yaml content to write to the repository.",
+							},
+							"update_existing_configuration": schema.BoolAttribute{
+								Optional:    true,
+								Computed:    true,
+								Default:     booldefault.StaticBool(false),
+								Description: "When true, overwrite an existing .pre-commit-config.yaml. When false (default), an existing file is left untouched and one is only created when absent.",
+							},
+						},
 					},
 					"package_ecosystem": schema.ListNestedAttribute{
 						Optional:    true,
@@ -498,6 +515,10 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 			"replace_action_on_major_tag_match":             types.BoolType,
 			"actions_exempted_from_replacement":             types.ListType{ElemType: types.StringType},
 			"update_precommit_file":                         types.ListType{ElemType: types.StringType},
+			"custom_precommit_config": types.ObjectType{AttrTypes: map[string]attr.Type{
+				"config":                        types.StringType,
+				"update_existing_configuration": types.BoolType,
+			}},
 			"package_ecosystem": types.ListType{
 				ElemType: types.ObjectType{
 					AttrTypes: map[string]attr.Type{
@@ -547,6 +568,20 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 			}()),
 			"add_workflows":     addWorkflowsValue,
 			"action_commit_map": actionCommitMapValue,
+			"custom_precommit_config": func() attr.Value {
+				cpcAttrTypes := map[string]attr.Type{
+					"config":                        types.StringType,
+					"update_existing_configuration": types.BoolType,
+				}
+				if policy.AutoRemdiationOptions.CustomPrecommitConfig != nil {
+					obj, _ := types.ObjectValue(cpcAttrTypes, map[string]attr.Value{
+						"config":                        types.StringValue(policy.AutoRemdiationOptions.CustomPrecommitConfig.Config),
+						"update_existing_configuration": types.BoolValue(policy.AutoRemdiationOptions.CustomPrecommitConfig.UpdateExistingConfiguration),
+					})
+					return obj
+				}
+				return types.ObjectNull(cpcAttrTypes)
+			}(),
 			"harden_runner_config": func() attr.Value {
 				if policy.AutoRemdiationOptions.HardenRunnerConfig != nil {
 					hrLabels := policy.AutoRemdiationOptions.HardenRunnerConfig.RunnerLabels
@@ -613,6 +648,7 @@ type autoRemdiationOptionsModel struct {
 	ReplaceByMajorTag                       types.Bool   `tfsdk:"replace_action_on_major_tag_match"`
 	ExemptedFromReplacement                 types.List   `tfsdk:"actions_exempted_from_replacement"`
 	UpdatePrecommitFile                     types.List   `tfsdk:"update_precommit_file"`
+	CustomPrecommitConfig                   types.Object `tfsdk:"custom_precommit_config"`
 	PackageEcosystem                        types.List   `tfsdk:"package_ecosystem"`
 	UpdateExistingConfiguration             types.Bool   `tfsdk:"update_existing_configuration"`
 	AddWorkflows                            types.String `tfsdk:"add_workflows"`
@@ -631,6 +667,11 @@ type hardenRunnerConfigModel struct {
 	Config                      types.String `tfsdk:"config"`
 	UpdateExistingConfiguration types.Bool   `tfsdk:"update_existing_configuration"`
 	RunnerLabels                types.List   `tfsdk:"target_runner_labels"`
+}
+
+type customPrecommitConfigModel struct {
+	Config                      types.String `tfsdk:"config"`
+	UpdateExistingConfiguration types.Bool   `tfsdk:"update_existing_configuration"`
 }
 
 type ActionsToReplaceModel struct {
@@ -753,6 +794,32 @@ func (r *policyDrivenPRResource) ValidateConfig(ctx context.Context, req resourc
 			}
 		}
 
+		// Pre-commit remediation has two mutually exclusive modes: selecting hooks
+		// (update_precommit_file) or pasting a full .pre-commit-config.yaml
+		// (custom_precommit_config). The API rejects a payload that sets both, so
+		// catch it at plan time with a clearer message. An empty hook list is not a
+		// conflict, that is how a previous selection is cleared.
+		if !options.CustomPrecommitConfig.IsNull() && !options.CustomPrecommitConfig.IsUnknown() {
+			var cpcModel customPrecommitConfigModel
+			diags := options.CustomPrecommitConfig.As(ctx, &cpcModel, basetypes.ObjectAsOptions{})
+			resp.Diagnostics.Append(diags...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			hasCustomConfig := !cpcModel.Config.IsUnknown() && strings.TrimSpace(cpcModel.Config.ValueString()) != ""
+			hasPrecommitHooks := !options.UpdatePrecommitFile.IsNull() &&
+				!options.UpdatePrecommitFile.IsUnknown() &&
+				len(options.UpdatePrecommitFile.Elements()) > 0
+
+			if hasCustomConfig && hasPrecommitHooks {
+				resp.Diagnostics.AddError(
+					"Invalid Configuration",
+					"update_precommit_file and custom_precommit_config are mutually exclusive. Select hooks with update_precommit_file, or provide a full .pre-commit-config.yaml with custom_precommit_config, but not both",
+				)
+			}
+		}
+
 	}
 }
 
@@ -788,7 +855,8 @@ func (r *policyDrivenPRResource) ModifyPlan(ctx context.Context, req resource.Mo
 	hasUpdatePrecommit := !options.UpdatePrecommitFile.IsNull() && !options.UpdatePrecommitFile.IsUnknown() && len(options.UpdatePrecommitFile.Elements()) > 0
 	hasPackageEcosystem := !options.PackageEcosystem.IsNull() && !options.PackageEcosystem.IsUnknown() && len(options.PackageEcosystem.Elements()) > 0
 	hasAddWorkflows := !options.AddWorkflows.IsNull() && !options.AddWorkflows.IsUnknown() && options.AddWorkflows.ValueString() != ""
-	hasV2Features := hasUpdatePrecommit || hasPackageEcosystem || hasAddWorkflows
+	hasCustomPrecommitConfig := !options.CustomPrecommitConfig.IsNull() && !options.CustomPrecommitConfig.IsUnknown()
+	hasV2Features := hasUpdatePrecommit || hasPackageEcosystem || hasAddWorkflows || hasCustomPrecommitConfig
 
 	if !hasV2Features {
 		return
@@ -1026,6 +1094,16 @@ func (r *policyDrivenPRResource) Create(ctx context.Context, req resource.Create
 		}
 	}
 
+	var customPrecommitConfig *stepsecurityapi.CustomPrecommitConfig
+	if !options.CustomPrecommitConfig.IsNull() && !options.CustomPrecommitConfig.IsUnknown() {
+		var cpcModel customPrecommitConfigModel
+		options.CustomPrecommitConfig.As(ctx, &cpcModel, basetypes.ObjectAsOptions{})
+		customPrecommitConfig = &stepsecurityapi.CustomPrecommitConfig{
+			Config:                      cpcModel.Config.ValueString(),
+			UpdateExistingConfiguration: cpcModel.UpdateExistingConfiguration.ValueBool(),
+		}
+	}
+
 	// convert to stepsecurityapi.PolicyDrivenPRPolicy
 	stepSecurityPolicy := stepsecurityapi.PolicyDrivenPRPolicy{
 		Owner: plan.Owner.ValueString(),
@@ -1050,6 +1128,7 @@ func (r *policyDrivenPRResource) Create(ctx context.Context, req resource.Create
 			AddWorkflows:                            options.AddWorkflows.ValueString(),
 			ActionCommitMap:                         actionCommitMap,
 			HardenRunnerConfig:                      hardenRunnerConfig,
+			CustomPrecommitConfig:                   customPrecommitConfig,
 		},
 		SelectedRepos:       selectedRepos,
 		SelectedReposFilter: selectedReposFilterForAllRepos,
@@ -1200,7 +1279,8 @@ func (r *policyDrivenPRResource) Read(ctx context.Context, req resource.ReadRequ
 			hasAddWorkflows := !currentStateOptions.AddWorkflows.IsNull() && currentStateOptions.AddWorkflows.ValueString() != ""
 			hasUpdateExistingConfig := !currentStateOptions.UpdateExistingConfiguration.IsNull() && currentStateOptions.UpdateExistingConfiguration.ValueBool()
 			hasHardenRunnerConfig := !currentStateOptions.HardenRunnerConfig.IsNull()
-			hasV2FeaturesInState = hasUpdatePrecommit || hasPackageEcosystem || hasAddWorkflows || hasUpdateExistingConfig || hasHardenRunnerConfig
+			hasCustomPrecommitConfig := !currentStateOptions.CustomPrecommitConfig.IsNull()
+			hasV2FeaturesInState = hasUpdatePrecommit || hasPackageEcosystem || hasAddWorkflows || hasUpdateExistingConfig || hasHardenRunnerConfig || hasCustomPrecommitConfig
 		}
 	}
 
@@ -1273,6 +1353,15 @@ func (r *policyDrivenPRResource) Read(ctx context.Context, req resource.ReadRequ
 				Subtractive:      hrcModel.UpdateExistingConfiguration.ValueBool(),
 				SkipHardenRunner: len(runnerLabels) > 0,
 				RunnerLabels:     runnerLabels,
+			}
+		}
+
+		if !currentStateOptions.CustomPrecommitConfig.IsNull() {
+			var cpcModel customPrecommitConfigModel
+			currentStateOptions.CustomPrecommitConfig.As(ctx, &cpcModel, basetypes.ObjectAsOptions{})
+			stepSecurityPolicy.AutoRemdiationOptions.CustomPrecommitConfig = &stepsecurityapi.CustomPrecommitConfig{
+				Config:                      cpcModel.Config.ValueString(),
+				UpdateExistingConfiguration: cpcModel.UpdateExistingConfiguration.ValueBool(),
 			}
 		}
 
@@ -1589,6 +1678,16 @@ func (r *policyDrivenPRResource) Update(ctx context.Context, req resource.Update
 		}
 	}
 
+	var customPrecommitConfigUpdate *stepsecurityapi.CustomPrecommitConfig
+	if !planOptions.CustomPrecommitConfig.IsNull() && !planOptions.CustomPrecommitConfig.IsUnknown() {
+		var cpcModel customPrecommitConfigModel
+		planOptions.CustomPrecommitConfig.As(ctx, &cpcModel, basetypes.ObjectAsOptions{})
+		customPrecommitConfigUpdate = &stepsecurityapi.CustomPrecommitConfig{
+			Config:                      cpcModel.Config.ValueString(),
+			UpdateExistingConfiguration: cpcModel.UpdateExistingConfiguration.ValueBool(),
+		}
+	}
+
 	policy := stepsecurityapi.PolicyDrivenPRPolicy{
 		Owner: plan.Owner.ValueString(),
 		AutoRemdiationOptions: stepsecurityapi.AutoRemdiationOptions{
@@ -1612,6 +1711,7 @@ func (r *policyDrivenPRResource) Update(ctx context.Context, req resource.Update
 			AddWorkflows:                            planOptions.AddWorkflows.ValueString(),
 			ActionCommitMap:                         actionCommitMapPlan,
 			HardenRunnerConfig:                      hardenRunnerConfigUpdate,
+			CustomPrecommitConfig:                   customPrecommitConfigUpdate,
 		},
 		SelectedRepos:       planRepos,
 		SelectedReposFilter: selectedReposFilterForAllRepos,
@@ -1870,6 +1970,10 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 			"replace_action_on_major_tag_match":             types.BoolType,
 			"actions_exempted_from_replacement":             types.ListType{ElemType: types.StringType},
 			"update_precommit_file":                         types.ListType{ElemType: types.StringType},
+			"custom_precommit_config": types.ObjectType{AttrTypes: map[string]attr.Type{
+				"config":                        types.StringType,
+				"update_existing_configuration": types.BoolType,
+			}},
 			"package_ecosystem": types.ListType{
 				ElemType: types.ObjectType{
 					AttrTypes: map[string]attr.Type{
@@ -1919,6 +2023,20 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 			}()),
 			"add_workflows":     addWorkflowsValue,
 			"action_commit_map": actionCommitMapValue,
+			"custom_precommit_config": func() attr.Value {
+				cpcAttrTypes := map[string]attr.Type{
+					"config":                        types.StringType,
+					"update_existing_configuration": types.BoolType,
+				}
+				if stepSecurityPolicy.AutoRemdiationOptions.CustomPrecommitConfig != nil {
+					obj, _ := types.ObjectValue(cpcAttrTypes, map[string]attr.Value{
+						"config":                        types.StringValue(stepSecurityPolicy.AutoRemdiationOptions.CustomPrecommitConfig.Config),
+						"update_existing_configuration": types.BoolValue(stepSecurityPolicy.AutoRemdiationOptions.CustomPrecommitConfig.UpdateExistingConfiguration),
+					})
+					return obj
+				}
+				return types.ObjectNull(cpcAttrTypes)
+			}(),
 			"harden_runner_config": func() attr.Value {
 				if stepSecurityPolicy.AutoRemdiationOptions.HardenRunnerConfig != nil {
 					hrLabels := stepSecurityPolicy.AutoRemdiationOptions.HardenRunnerConfig.RunnerLabels

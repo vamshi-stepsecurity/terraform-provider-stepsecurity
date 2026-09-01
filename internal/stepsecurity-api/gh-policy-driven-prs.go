@@ -26,26 +26,27 @@ type PolicyDrivenPRPolicy struct {
 }
 
 type AutoRemdiationOptions struct {
-	CreatePR                                bool                `json:"create_pr"`
-	CreateIssue                             bool                `json:"create_issue"`
-	CreateGitHubAdvancedSecurityAlert       bool                `json:"create_github_advanced_security_alert"`
-	HardenGitHubHostedRunner                bool                `json:"harden_github_hosted_runner"`
-	PinActionsToSHA                         bool                `json:"pin_actions_to_sha"`
-	RestrictGitHubTokenPermissions          bool                `json:"restrict_github_token_permissions"`
-	SecureDockerFile                        bool                `json:"secure_docker_file"`
-	ActionsToExemptWhilePinning             []string            `json:"actions_to_exempt_while_pinning"`
-	ImagesToExemptWhilePinning              []string            `json:"images_to_exempt_while_pinning"`
-	ActionsToReplaceWithStepSecurityActions []string            `json:"actions_to_replace_with_step_security_actions"`
-	CustomActionsToReplace                  map[string]string   `json:"custom_actions_to_replace,omitempty"`
-	ReplaceByMajorTag                       *bool               `json:"replace_by_major_tag,omitempty"`
-	ExemptedFromReplacement                 []string            `json:"exempted_from_replacement,omitempty"`
-	UpdatePrecommitFile                     []string            `json:"update_precommit_file,omitempty"`
-	PackageEcosystem                        []DependabotConfig  `json:"package_ecosystem,omitempty"`
-	Subtractive                             *bool               `json:"subtractive,omitempty"`
-	AddWorkflows                            string              `json:"add_workflows,omitempty"`
-	ActionCommitMap                         map[string]string   `json:"action_commit_map"`
-	HardenRunnerConfig                      *HardenRunnerConfig `json:"harden_runner_config,omitempty"`
-	LabelsToReplace                         map[string]string   `json:"labels_to_replace,omitempty"`
+	CreatePR                                bool                   `json:"create_pr"`
+	CreateIssue                             bool                   `json:"create_issue"`
+	CreateGitHubAdvancedSecurityAlert       bool                   `json:"create_github_advanced_security_alert"`
+	HardenGitHubHostedRunner                bool                   `json:"harden_github_hosted_runner"`
+	PinActionsToSHA                         bool                   `json:"pin_actions_to_sha"`
+	RestrictGitHubTokenPermissions          bool                   `json:"restrict_github_token_permissions"`
+	SecureDockerFile                        bool                   `json:"secure_docker_file"`
+	ActionsToExemptWhilePinning             []string               `json:"actions_to_exempt_while_pinning"`
+	ImagesToExemptWhilePinning              []string               `json:"images_to_exempt_while_pinning"`
+	ActionsToReplaceWithStepSecurityActions []string               `json:"actions_to_replace_with_step_security_actions"`
+	CustomActionsToReplace                  map[string]string      `json:"custom_actions_to_replace,omitempty"`
+	ReplaceByMajorTag                       *bool                  `json:"replace_by_major_tag,omitempty"`
+	ExemptedFromReplacement                 []string               `json:"exempted_from_replacement,omitempty"`
+	UpdatePrecommitFile                     []string               `json:"update_precommit_file,omitempty"`
+	CustomPrecommitConfig                   *CustomPrecommitConfig `json:"custom_precommit_config,omitempty"`
+	PackageEcosystem                        []DependabotConfig     `json:"package_ecosystem,omitempty"`
+	Subtractive                             *bool                  `json:"subtractive,omitempty"`
+	AddWorkflows                            string                 `json:"add_workflows,omitempty"`
+	ActionCommitMap                         map[string]string      `json:"action_commit_map"`
+	HardenRunnerConfig                      *HardenRunnerConfig    `json:"harden_runner_config,omitempty"`
+	LabelsToReplace                         map[string]string      `json:"labels_to_replace,omitempty"`
 }
 
 // API request/response structures matching agent-api
@@ -74,6 +75,7 @@ type controlSettings struct {
 	ReplaceAllActions                   *bool                                `json:"replace_all_actions,omitempty"`
 	LabelsToReplace                     map[string]string                    `json:"labels_to_replace"`
 	UpdatePrecommitFile                 map[string]bool                      `json:"update_precommit_file,omitempty"`
+	CustomPrecommitConfig               *CustomPrecommitConfig               `json:"custom_precommit_config,omitempty"`
 	PackageEcosystem                    []DependabotConfig                   `json:"package_ecosystem,omitempty"`
 	Subtractive                         *bool                                `json:"subtractive,omitempty"`
 	AddWorkflows                        string                               `json:"add_workflows,omitempty"`
@@ -100,6 +102,14 @@ type HardenRunnerConfig struct {
 	Subtractive      bool     `json:"subtractive"`
 	SkipHardenRunner bool     `json:"skipHardenRunner"`
 	RunnerLabels     []string `json:"runnerLabels"`
+}
+
+// CustomPrecommitConfig is a full .pre-commit-config.yaml provided verbatim.
+// UpdateExistingConfiguration gates overwriting an existing file: false leaves an
+// existing config untouched (only creates when absent); true overwrites it.
+type CustomPrecommitConfig struct {
+	Config                      string `json:"config,omitempty"`
+	UpdateExistingConfiguration bool   `json:"update_existing_configuration,omitempty"`
 }
 
 type featureConfigResponse struct {
@@ -204,7 +214,8 @@ func (c *APIClient) CreatePolicyDrivenPRPolicy(ctx context.Context, createReques
 		}
 	}
 
-	if len(createRequest.AutoRemdiationOptions.UpdatePrecommitFile) > 0 {
+	if len(createRequest.AutoRemdiationOptions.UpdatePrecommitFile) > 0 ||
+		createRequest.AutoRemdiationOptions.CustomPrecommitConfig != nil {
 		controlChecksConfig["UpdatePrecommitFile"] = issuePRConfig{
 			TriggerGithubIssue: createIssue,
 			TriggerGithubPr:    createPR,
@@ -239,6 +250,7 @@ func (c *APIClient) CreatePolicyDrivenPRPolicy(ctx context.Context, createReques
 		ReplaceAllActions:                   replaceAllActions,
 		LabelsToReplace:                     createRequest.AutoRemdiationOptions.LabelsToReplace,
 		UpdatePrecommitFile:                 updatePrecommitFileMap,
+		CustomPrecommitConfig:               createRequest.AutoRemdiationOptions.CustomPrecommitConfig,
 		PackageEcosystem:                    createRequest.AutoRemdiationOptions.PackageEcosystem,
 		Subtractive:                         createRequest.AutoRemdiationOptions.Subtractive,
 		AddWorkflows:                        createRequest.AutoRemdiationOptions.AddWorkflows,
@@ -450,6 +462,7 @@ func (c *APIClient) GetPolicyDrivenPRPolicy(ctx context.Context, owner string, r
 		ReplaceByMajorTag:                       selectedConfig.ControlSettings.ReplaceByMajorTag,
 		ExemptedFromReplacement:                 selectedConfig.ControlSettings.ExemptedFromReplacement,
 		UpdatePrecommitFile:                     updatePrecommitFiles,
+		CustomPrecommitConfig:                   selectedConfig.ControlSettings.CustomPrecommitConfig,
 		PackageEcosystem:                        selectedConfig.ControlSettings.PackageEcosystem,
 		Subtractive:                             selectedConfig.ControlSettings.Subtractive,
 		AddWorkflows:                            selectedConfig.ControlSettings.AddWorkflows,
@@ -671,6 +684,7 @@ func (c *APIClient) DiscoverPolicyDrivenPRConfig(ctx context.Context, owner stri
 		ReplaceByMajorTag:                       selectedConfig.ControlSettings.ReplaceByMajorTag,
 		ExemptedFromReplacement:                 selectedConfig.ControlSettings.ExemptedFromReplacement,
 		UpdatePrecommitFile:                     updatePrecommitFiles,
+		CustomPrecommitConfig:                   selectedConfig.ControlSettings.CustomPrecommitConfig,
 		PackageEcosystem:                        selectedConfig.ControlSettings.PackageEcosystem,
 		Subtractive:                             selectedConfig.ControlSettings.Subtractive,
 		AddWorkflows:                            selectedConfig.ControlSettings.AddWorkflows,
