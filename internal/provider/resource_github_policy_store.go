@@ -77,6 +77,9 @@ func (r *githubPolicyStoreResource) Schema(_ context.Context, _ resource.SchemaR
 						},
 					),
 				),
+				PlanModifiers: []planmodifier.List{
+					suppressAllowedEndpointsDefaultWhenDeniedSetModifier{},
+				},
 				Description: "List of allowed endpoints. This specifies list of enpoints to allow when egress policy is set to 'block' mode",
 			},
 			"denied_endpoints": schema.SetAttribute{
@@ -140,6 +143,46 @@ func (r *githubPolicyStoreResource) Schema(_ context.Context, _ resource.SchemaR
 				},
 			},
 		},
+	}
+}
+
+// suppressAllowedEndpointsDefaultWhenDeniedSetModifier prevents allowed_endpoints
+// from resolving to its ["github.com:443"] default when the user configured
+// denied_endpoints instead. Without this, a config that only sets
+// denied_endpoints would still plan allowed_endpoints as its default, and the
+// API rejects any request where both are non-empty with "allowed_endpoints and
+// denied_endpoints cannot both be present" - even though the user never set
+// allowed_endpoints themselves. If the user explicitly configures
+// allowed_endpoints, this modifier does nothing and ValidateConfig's conflict
+// check applies as normal.
+type suppressAllowedEndpointsDefaultWhenDeniedSetModifier struct{}
+
+func (m suppressAllowedEndpointsDefaultWhenDeniedSetModifier) Description(_ context.Context) string {
+	return "Avoids defaulting allowed_endpoints when denied_endpoints is configured."
+}
+
+func (m suppressAllowedEndpointsDefaultWhenDeniedSetModifier) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m suppressAllowedEndpointsDefaultWhenDeniedSetModifier) PlanModifyList(ctx context.Context, req planmodifier.ListRequest, resp *planmodifier.ListResponse) {
+	if !req.ConfigValue.IsNull() {
+		return
+	}
+
+	var deniedEndpoints types.Set
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("denied_endpoints"), &deniedEndpoints)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if deniedEndpoints.IsUnknown() {
+		resp.PlanValue = types.ListUnknown(types.StringType)
+		return
+	}
+
+	if !deniedEndpoints.IsNull() && len(deniedEndpoints.Elements()) > 0 {
+		resp.PlanValue = types.ListValueMust(types.StringType, []attr.Value{})
 	}
 }
 
