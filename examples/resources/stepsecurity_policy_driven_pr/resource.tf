@@ -53,9 +53,12 @@ resource "stepsecurity_policy_driven_pr" "repo_level_config" {
     }
     actions_to_exempt_while_pinning               = ["actions/checkout", "actions/setup-node"]
     actions_to_replace_with_step_security_actions = ["enricomi/publish-unit-test-result-action", "tj-actions/changed-files"]
-    replace_action_on_major_tag_match             = true                         # actions in actions_to_replace_with_step_security_actions are replaced only when the major tag matches
-    actions_exempted_from_replacement             = ["fkirc/skip-*", "amannn/*"] // either actions_to_replace_with_step_security_actions or actions_exempted_from_replacement can be set at a time unless its *
-    images_to_exempt_while_pinning                = ["amazon*"]
+    custom_actions_to_replace = {
+      "third-party-actions/dynamodb-actions" = "step-security/dynamodb-actions"
+    }                                                                // replaces all third-party actions with step-security/dynamodb-actions
+    replace_action_on_major_tag_match = true                         # actions in actions_to_replace_with_step_security_actions are replaced only when the major tag matches
+    actions_exempted_from_replacement = ["fkirc/skip-*", "amannn/*"] // either actions_to_replace_with_step_security_actions or actions_exempted_from_replacement can be set at a time unless its *
+    images_to_exempt_while_pinning    = ["amazon*"]
 
     # v2-only features (requires policy-driven PR v2 to be enabled)
     update_precommit_file = ["eslint"]
@@ -127,7 +130,7 @@ resource "stepsecurity_policy_driven_pr" "org_level_with_exclusions" {
     restrict_github_token_permissions             = false
     secure_docker_file                            = false
     actions_to_replace_with_step_security_actions = ["*"]                        // all actions with stepsecurity actions will be replaced
-    actions_exempted_from_replacement             = ["fkirc/skip-*", "amannn/*"] // all actions except these will be replaced since its specified 
+    actions_exempted_from_replacement             = ["fkirc/skip-*", "amannn/*"] // all actions except these will be replaced since its specified
   }
 }
 

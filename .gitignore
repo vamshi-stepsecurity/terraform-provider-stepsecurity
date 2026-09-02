@@ -2,6 +2,7 @@
 *.exe
 .DS_Store
 example.tf
+test_clean.tf
 terraform.tfplan
 terraform.tfstate
 bin/

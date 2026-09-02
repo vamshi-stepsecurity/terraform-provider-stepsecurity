@@ -73,6 +73,25 @@ type Client interface {
 	GetRegistryControls(ctx context.Context, registry string) (*SecureRegistryControls, error)
 	UpsertRegistryControls(ctx context.Context, registry string, req UpsertSecureRegistryControlsRequest) (*SecureRegistryControls, error)
 	DeleteRegistryControls(ctx context.Context, registry string) error
+
+	// Developer MDM Policies
+	CreateDeveloperMDMPolicy(ctx context.Context, req DeveloperMDMPolicyRequest) (*DeveloperMDMPolicy, error)
+	ListDeveloperMDMPolicies(ctx context.Context) ([]DeveloperMDMPolicy, error)
+	GetDeveloperMDMPolicy(ctx context.Context, policyID string) (*DeveloperMDMPolicy, error)
+	UpdateDeveloperMDMPolicy(ctx context.Context, policyID string, req DeveloperMDMPolicyRequest) (*DeveloperMDMPolicy, error)
+	DeleteDeveloperMDMPolicy(ctx context.Context, policyID string) error
+
+	// Developer MDM Profiles
+	CreateDeveloperMDMProfile(ctx context.Context, req DeveloperMDMProfileRequest) (*DeveloperMDMProfile, error)
+	ListDeveloperMDMProfiles(ctx context.Context) ([]DeveloperMDMProfile, error)
+	GetDeveloperMDMProfile(ctx context.Context, profileID string) (*DeveloperMDMProfile, error)
+	UpdateDeveloperMDMProfile(ctx context.Context, profileID string, req DeveloperMDMProfileRequest) (*DeveloperMDMProfile, error)
+	DeleteDeveloperMDMProfile(ctx context.Context, profileID string) error
+
+	// Developer MDM Export and Compliance
+	ExportDeveloperMDMProfile(ctx context.Context, profileID, os, category, target, format string) (*DeveloperMDMExportArtifact, error)
+	GetDeveloperMDMDeviceCompliance(ctx context.Context, deviceID string) (*DeveloperMDMDeviceComplianceResponse, error)
+	GetDeveloperMDMProfileCompliance(ctx context.Context, profileID string) (*DeveloperMDMProfileComplianceResponse, error)
 }
 
 type APIClient struct {

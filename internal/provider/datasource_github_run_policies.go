@@ -123,7 +123,7 @@ func (d *githubRunPoliciesDataSource) Schema(_ context.Context, _ datasource.Sch
 								"allowed_actions": schema.MapAttribute{
 									ElementType:         types.StringType,
 									Computed:            true,
-									MarkdownDescription: "Map of allowed actions and their permissions.",
+									MarkdownDescription: "Map of allowed actions and their permissions. Keys may be an exact ref (`actions/checkout@v4`), a name-only match (`actions/checkout`), an owner wildcard (`my-org/*`), or the global wildcard (`*/*`).",
 								},
 								"enable_harden_runner_policy": schema.BoolAttribute{
 									Computed:            true,
@@ -147,6 +147,10 @@ func (d *githubRunPoliciesDataSource) Schema(_ context.Context, _ datasource.Sch
 									ElementType:         types.StringType,
 									Computed:            true,
 									MarkdownDescription: "Set of disallowed runner labels.",
+								},
+								"enable_standard_runner_labels": schema.BoolAttribute{
+									Computed:            true,
+									MarkdownDescription: "Whether the GitHub-hosted standard runner label set is added to the policy labels at evaluation time.",
 								},
 								"enable_secrets_policy": schema.BoolAttribute{
 									Computed:            true,
@@ -176,6 +180,32 @@ func (d *githubRunPoliciesDataSource) Schema(_ context.Context, _ datasource.Sch
 								"bulk_secrets_only_mode": schema.BoolAttribute{
 									Computed:            true,
 									MarkdownDescription: "When enabled, the secret exfiltration policy restricts enforcement to high-risk bulk secret-exposure attempts rather than all secret references. See the StepSecurity run-policies documentation for details.",
+								},
+								"runs_on_mode": schema.StringAttribute{
+									Computed:            true,
+									MarkdownDescription: "How the runs-on policy evaluates runner labels: `disallowed` (default; empty string treated the same) blocks `disallowed_runner_labels`, `allowed` only permits `allowed_runner_labels` / `allowed_runner_constraints`.",
+								},
+								"allowed_runner_labels": schema.SetAttribute{
+									ElementType:         types.StringType,
+									Computed:            true,
+									MarkdownDescription: "Set of plain runner labels permitted when `runs_on_mode` is `allowed`.",
+								},
+								"allowed_runner_constraints": schema.MapAttribute{
+									ElementType:         types.SetType{ElemType: types.StringType},
+									Computed:            true,
+									MarkdownDescription: "Structured runs-on.com constraints permitted when `runs_on_mode` is `allowed`, keyed by dimension (e.g. `family`, `cpu`, `image`); each key maps to the set of allowed values. Expression values match by exact text, which also lets the `runs-on` routing key be pinned.",
+								},
+								"require_policy_store": schema.BoolAttribute{
+									Computed:            true,
+									MarkdownDescription: "When true, every job targeted by the Harden Runner policy must set `use-policy-store: true` on its Harden Runner step.",
+								},
+								"block_job_container": schema.BoolAttribute{
+									Computed:            true,
+									MarkdownDescription: "When true, targeted jobs that run entirely inside a job-level `container:` are blocked (Harden Runner cannot monitor a fully containerized job on GitHub-hosted standard runners).",
+								},
+								"secrets_analyze_default_branch": schema.BoolAttribute{
+									Computed:            true,
+									MarkdownDescription: "When true, the secrets policy also evaluates runs on the repository default branch.",
 								},
 							},
 						},
@@ -246,12 +276,17 @@ func (d *githubRunPoliciesDataSource) Read(ctx context.Context, req datasource.R
 			"enable_action_policy":              types.BoolValue(policy.PolicyConfig.EnableActionPolicy),
 			"enable_harden_runner_policy":       types.BoolValue(policy.PolicyConfig.EnableHardenRunnerPolicy),
 			"enable_runs_on_policy":             types.BoolValue(policy.PolicyConfig.EnableRunsOnPolicy),
+			"enable_standard_runner_labels":     types.BoolValue(policy.PolicyConfig.EnableStandardRunnerLabels),
 			"enable_secrets_policy":             types.BoolValue(policy.PolicyConfig.EnableSecretsPolicy),
 			"enable_compromised_actions_policy": types.BoolValue(policy.PolicyConfig.EnableCompromisedActionsPolicy),
 			"require_pinned_actions":            types.BoolValue(policy.PolicyConfig.RequirePinnedActions),
 			"is_dry_run":                        types.BoolValue(policy.PolicyConfig.IsDryRun),
 			"bulk_secrets_only_mode":            types.BoolValue(policy.PolicyConfig.BulkSecretsOnlyMode),
 			"pr_comment_template":               types.StringValue(policy.PolicyConfig.PrCommentTemplate),
+			"runs_on_mode":                      types.StringValue(policy.PolicyConfig.RunsOnMode),
+			"require_policy_store":              types.BoolValue(policy.PolicyConfig.RequirePolicyStore),
+			"block_job_container":               types.BoolValue(policy.PolicyConfig.BlockJobContainer),
+			"secrets_analyze_default_branch":    types.BoolValue(policy.PolicyConfig.SecretsAnalyzeDefaultBranch),
 		}
 
 		// Handle allowed actions map
@@ -310,6 +345,35 @@ func (d *githubRunPoliciesDataSource) Read(ctx context.Context, req datasource.R
 			policyConfigAttrs["disallowed_runner_labels"] = types.SetNull(types.StringType)
 		}
 
+		// Handle allowed runner labels set (allowed runs-on mode)
+		if policy.PolicyConfig.AllowedRunnerLabels != nil {
+			allowedLabelsList := make([]attr.Value, 0, len(policy.PolicyConfig.AllowedRunnerLabels))
+			for label := range policy.PolicyConfig.AllowedRunnerLabels {
+				allowedLabelsList = append(allowedLabelsList, types.StringValue(label))
+			}
+			setValue, _ := types.SetValue(types.StringType, allowedLabelsList)
+			policyConfigAttrs["allowed_runner_labels"] = setValue
+		} else {
+			policyConfigAttrs["allowed_runner_labels"] = types.SetNull(types.StringType)
+		}
+
+		// Handle allowed runner constraints map (allowed runs-on mode)
+		if policy.PolicyConfig.AllowedRunnerConstraints != nil {
+			constraintsMap := make(map[string]attr.Value, len(policy.PolicyConfig.AllowedRunnerConstraints))
+			for key, values := range policy.PolicyConfig.AllowedRunnerConstraints {
+				valueList := make([]attr.Value, len(values))
+				for i, v := range values {
+					valueList[i] = types.StringValue(v)
+				}
+				setValue, _ := types.SetValue(types.StringType, valueList)
+				constraintsMap[key] = setValue
+			}
+			mapValue, _ := types.MapValue(types.SetType{ElemType: types.StringType}, constraintsMap)
+			policyConfigAttrs["allowed_runner_constraints"] = mapValue
+		} else {
+			policyConfigAttrs["allowed_runner_constraints"] = types.MapNull(types.SetType{ElemType: types.StringType})
+		}
+
 		// Handle pinned actions exemptions set
 		if policy.PolicyConfig.PinnedActionsExemptions != nil {
 			pinnedExemptionsList := make([]attr.Value, len(policy.PolicyConfig.PinnedActionsExemptions))
@@ -332,6 +396,7 @@ func (d *githubRunPoliciesDataSource) Read(ctx context.Context, req datasource.R
 			"harden_runner_target_labels":       types.SetType{ElemType: types.StringType},
 			"harden_runner_custom_actions":      types.SetType{ElemType: types.StringType},
 			"enable_runs_on_policy":             types.BoolType,
+			"enable_standard_runner_labels":     types.BoolType,
 			"disallowed_runner_labels":          types.SetType{ElemType: types.StringType},
 			"enable_secrets_policy":             types.BoolType,
 			"enable_compromised_actions_policy": types.BoolType,
@@ -340,6 +405,12 @@ func (d *githubRunPoliciesDataSource) Read(ctx context.Context, req datasource.R
 			"is_dry_run":                        types.BoolType,
 			"bulk_secrets_only_mode":            types.BoolType,
 			"pr_comment_template":               types.StringType,
+			"runs_on_mode":                      types.StringType,
+			"allowed_runner_labels":             types.SetType{ElemType: types.StringType},
+			"allowed_runner_constraints":        types.MapType{ElemType: types.SetType{ElemType: types.StringType}},
+			"require_policy_store":              types.BoolType,
+			"block_job_container":               types.BoolType,
+			"secrets_analyze_default_branch":    types.BoolType,
 		}
 
 		policyConfigObj, _ := types.ObjectValue(policyConfigAttrTypes, policyConfigAttrs)
@@ -401,6 +472,7 @@ func (d *githubRunPoliciesDataSource) Read(ctx context.Context, req datasource.R
 			"harden_runner_target_labels":       types.SetType{ElemType: types.StringType},
 			"harden_runner_custom_actions":      types.SetType{ElemType: types.StringType},
 			"enable_runs_on_policy":             types.BoolType,
+			"enable_standard_runner_labels":     types.BoolType,
 			"disallowed_runner_labels":          types.SetType{ElemType: types.StringType},
 			"enable_secrets_policy":             types.BoolType,
 			"enable_compromised_actions_policy": types.BoolType,
@@ -409,6 +481,12 @@ func (d *githubRunPoliciesDataSource) Read(ctx context.Context, req datasource.R
 			"is_dry_run":                        types.BoolType,
 			"bulk_secrets_only_mode":            types.BoolType,
 			"pr_comment_template":               types.StringType,
+			"runs_on_mode":                      types.StringType,
+			"allowed_runner_labels":             types.SetType{ElemType: types.StringType},
+			"allowed_runner_constraints":        types.MapType{ElemType: types.SetType{ElemType: types.StringType}},
+			"require_policy_store":              types.BoolType,
+			"block_job_container":               types.BoolType,
+			"secrets_analyze_default_branch":    types.BoolType,
 		}},
 	}
 

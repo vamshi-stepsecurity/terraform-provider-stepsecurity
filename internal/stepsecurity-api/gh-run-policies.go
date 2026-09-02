@@ -32,6 +32,7 @@ type RunPolicyConfig struct {
 	HardenRunnerCustomActions      []string            `json:"harden_runner_custom_actions,omitempty"`
 	EnableRunsOnPolicy             bool                `json:"enable_runs_on_policy,omitempty"`
 	DisallowedRunnerLabels         map[string]struct{} `json:"disallowed_runner_labels,omitempty"`
+	EnableStandardRunnerLabels     bool                `json:"enable_standard_runner_labels,omitempty"`
 	EnableSecretsPolicy            bool                `json:"enable_secrets_policy,omitempty"`
 	EnableCompromisedActionsPolicy bool                `json:"enable_compromised_actions_policy,omitempty"`
 	RequirePinnedActions           bool                `json:"require_pinned_actions,omitempty"`
@@ -40,6 +41,12 @@ type RunPolicyConfig struct {
 	ExemptedUsers                  []string            `json:"exempted_users,omitempty"`
 	BulkSecretsOnlyMode            bool                `json:"bulk_secrets_only_mode,omitempty"`
 	PrCommentTemplate              string              `json:"pr_comment_template,omitempty"`
+	RunsOnMode                     string              `json:"runs_on_mode,omitempty"`
+	AllowedRunnerLabels            map[string]struct{} `json:"allowed_runner_labels,omitempty"`
+	AllowedRunnerConstraints       map[string][]string `json:"allowed_runner_constraints,omitempty"`
+	RequirePolicyStore             bool                `json:"require_policy_store,omitempty"`
+	BlockJobContainer              bool                `json:"block_job_container,omitempty"`
+	SecretsAnalyzeDefaultBranch    bool                `json:"secrets_analyze_default_branch,omitempty"`
 }
 
 type CreateRunPolicyRequest struct {

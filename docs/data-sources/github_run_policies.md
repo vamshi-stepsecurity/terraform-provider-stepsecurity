@@ -199,7 +199,10 @@ Read-Only:
 Read-Only:
 
 - `actions_to_exempt_while_pinning` (Set of String) Set of actions exempt from pinning requirements.
-- `allowed_actions` (Map of String) Map of allowed actions and their permissions.
+- `allowed_actions` (Map of String) Map of allowed actions and their permissions. Keys may be an exact ref (`actions/checkout@v4`), a name-only match (`actions/checkout`), an owner wildcard (`my-org/*`), or the global wildcard (`*/*`).
+- `allowed_runner_constraints` (Map of Set of String) Structured runs-on.com constraints permitted when `runs_on_mode` is `allowed`, keyed by dimension (e.g. `family`, `cpu`, `image`); each key maps to the set of allowed values. Expression values match by exact text, which also lets the `runs-on` routing key be pinned.
+- `allowed_runner_labels` (Set of String) Set of plain runner labels permitted when `runs_on_mode` is `allowed`.
+- `block_job_container` (Boolean) When true, targeted jobs that run entirely inside a job-level `container:` are blocked (Harden Runner cannot monitor a fully containerized job on GitHub-hosted standard runners).
 - `bulk_secrets_only_mode` (Boolean) When enabled, the secret exfiltration policy restricts enforcement to high-risk bulk secret-exposure attempts rather than all secret references. See the StepSecurity run-policies documentation for details.
 - `disallowed_runner_labels` (Set of String) Set of disallowed runner labels.
 - `enable_action_policy` (Boolean) Whether the action policy is enabled.
@@ -207,6 +210,7 @@ Read-Only:
 - `enable_harden_runner_policy` (Boolean) Whether the Harden Runner policy is enabled.
 - `enable_runs_on_policy` (Boolean) Whether the runs-on policy is enabled.
 - `enable_secrets_policy` (Boolean) Whether the secrets policy is enabled.
+- `enable_standard_runner_labels` (Boolean) Whether the GitHub-hosted standard runner label set is added to the policy labels at evaluation time.
 - `harden_runner_custom_actions` (Set of String) Set of custom actions accepted as Harden Runner equivalents (in addition to `step-security/harden-runner`).
 - `harden_runner_target_labels` (Set of String) Set of runner labels that target Harden Runner enforcement. When `enable_harden_runner_policy` is true, an empty set means the policy applies to every job; a non-empty set filters to jobs whose `runs-on` matches at least one label. When the policy is disabled, this attribute is null.
 - `is_dry_run` (Boolean) Whether this policy is in dry-run mode.
@@ -214,3 +218,6 @@ Read-Only:
 - `owner` (String) The owner of the policy configuration.
 - `pr_comment_template` (String) Optional custom template for the pull request comment posted when this policy blocks a run. Supports placeholder substitution; leave empty to use the default StepSecurity comment.
 - `require_pinned_actions` (Boolean) Whether all actions are required to be pinned to full-length commit SHAs.
+- `require_policy_store` (Boolean) When true, every job targeted by the Harden Runner policy must set `use-policy-store: true` on its Harden Runner step.
+- `runs_on_mode` (String) How the runs-on policy evaluates runner labels: `disallowed` (default; empty string treated the same) blocks `disallowed_runner_labels`, `allowed` only permits `allowed_runner_labels` / `allowed_runner_constraints`.
+- `secrets_analyze_default_branch` (Boolean) When true, the secrets policy also evaluates runs on the repository default branch.

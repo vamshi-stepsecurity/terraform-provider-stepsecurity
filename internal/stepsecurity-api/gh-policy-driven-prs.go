@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ type AutoRemdiationOptions struct {
 	ActionsToExemptWhilePinning             []string            `json:"actions_to_exempt_while_pinning"`
 	ImagesToExemptWhilePinning              []string            `json:"images_to_exempt_while_pinning"`
 	ActionsToReplaceWithStepSecurityActions []string            `json:"actions_to_replace_with_step_security_actions"`
+	CustomActionsToReplace                  map[string]string   `json:"custom_actions_to_replace,omitempty"`
 	ReplaceByMajorTag                       *bool               `json:"replace_by_major_tag,omitempty"`
 	ExemptedFromReplacement                 []string            `json:"exempted_from_replacement,omitempty"`
 	UpdatePrecommitFile                     []string            `json:"update_precommit_file,omitempty"`
@@ -66,6 +68,7 @@ type issuePRConfig struct {
 type controlSettings struct {
 	ExemptedActions                     []string                             `json:"exempted_actions,omitempty"`
 	ActionsToReplace                    map[string]string                    `json:"actions_to_replace,omitempty"`
+	CustomActionsToReplace              map[string]string                    `json:"custom_actions_to_replace,omitempty"`
 	ReplaceByMajorTag                   *bool                                `json:"replace_by_major_tag,omitempty"`
 	ExemptedFromReplacement             []string                             `json:"exempted_from_replacement,omitempty"`
 	ReplaceAllActions                   *bool                                `json:"replace_all_actions,omitempty"`
@@ -194,7 +197,8 @@ func (c *APIClient) CreatePolicyDrivenPRPolicy(ctx context.Context, createReques
 	}
 
 	if len(createRequest.AutoRemdiationOptions.ActionsToReplaceWithStepSecurityActions) > 0 ||
-		len(createRequest.AutoRemdiationOptions.ExemptedFromReplacement) > 0 {
+		len(createRequest.AutoRemdiationOptions.ExemptedFromReplacement) > 0 ||
+		len(createRequest.AutoRemdiationOptions.CustomActionsToReplace) > 0 {
 		controlChecksConfig["MaintainedGitHubActionsShouldBeUsed"] = issuePRConfig{
 			TriggerGithubIssue: createIssue,
 			TriggerGithubPr:    createPR,
@@ -230,6 +234,7 @@ func (c *APIClient) CreatePolicyDrivenPRPolicy(ctx context.Context, createReques
 	cs := &controlSettings{
 		ExemptedActions:                     createRequest.AutoRemdiationOptions.ActionsToExemptWhilePinning,
 		ActionsToReplace:                    actionsToReplace,
+		CustomActionsToReplace:              createRequest.AutoRemdiationOptions.CustomActionsToReplace,
 		ReplaceByMajorTag:                   createRequest.AutoRemdiationOptions.ReplaceByMajorTag,
 		ExemptedFromReplacement:             createRequest.AutoRemdiationOptions.ExemptedFromReplacement,
 		ReplaceAllActions:                   replaceAllActions,
@@ -413,17 +418,19 @@ func (c *APIClient) GetPolicyDrivenPRPolicy(ctx context.Context, owner string, r
 	enabledSecureDocker := selectedConfig.ControlChecksConfig["SecureDockerFile"].TriggerGithubIssue ||
 		selectedConfig.ControlChecksConfig["SecureDockerFile"].TriggerGithubPr
 
-	// Extract actions to replace
+	// Extract actions to replace (sorted for deterministic ordering)
 	actionsToReplace := []string{}
 	for action := range selectedConfig.ControlSettings.ActionsToReplace {
 		actionsToReplace = append(actionsToReplace, action)
 	}
+	sort.Strings(actionsToReplace)
 
-	// Convert update_precommit_file from map to array
+	// Convert update_precommit_file from map to array (sorted for deterministic ordering)
 	updatePrecommitFiles := []string{}
 	for file := range selectedConfig.ControlSettings.UpdatePrecommitFile {
 		updatePrecommitFiles = append(updatePrecommitFiles, file)
 	}
+	sort.Strings(updatePrecommitFiles)
 
 	// Set policy fields - repos will be set by the caller based on state
 	policy.UseRepoLevelConfig = !isOrgLevel
@@ -440,6 +447,7 @@ func (c *APIClient) GetPolicyDrivenPRPolicy(ctx context.Context, owner string, r
 		ActionsToExemptWhilePinning:             selectedConfig.ControlSettings.ExemptedActions,
 		ImagesToExemptWhilePinning:              selectedConfig.ControlSettings.ExemptedImages,
 		ActionsToReplaceWithStepSecurityActions: actionsToReplace,
+		CustomActionsToReplace:                  selectedConfig.ControlSettings.CustomActionsToReplace,
 		ReplaceByMajorTag:                       selectedConfig.ControlSettings.ReplaceByMajorTag,
 		ExemptedFromReplacement:                 selectedConfig.ControlSettings.ExemptedFromReplacement,
 		UpdatePrecommitFile:                     updatePrecommitFiles,
@@ -631,17 +639,19 @@ func (c *APIClient) DiscoverPolicyDrivenPRConfig(ctx context.Context, owner stri
 	enabledSecureDocker := selectedConfig.ControlChecksConfig["SecureDockerFile"].TriggerGithubIssue ||
 		selectedConfig.ControlChecksConfig["SecureDockerFile"].TriggerGithubPr
 
-	// Extract actions to replace
+	// Extract actions to replace (sorted for deterministic ordering)
 	actionsToReplace := []string{}
 	for action := range selectedConfig.ControlSettings.ActionsToReplace {
 		actionsToReplace = append(actionsToReplace, action)
 	}
+	sort.Strings(actionsToReplace)
 
-	// Convert update_precommit_file from map to array
+	// Convert update_precommit_file from map to array (sorted for deterministic ordering)
 	updatePrecommitFiles := []string{}
 	for file := range selectedConfig.ControlSettings.UpdatePrecommitFile {
 		updatePrecommitFiles = append(updatePrecommitFiles, file)
 	}
+	sort.Strings(updatePrecommitFiles)
 
 	policy.SelectedRepos = selectedRepos
 	policy.UseRepoLevelConfig = !useOrgLevel
@@ -658,6 +668,7 @@ func (c *APIClient) DiscoverPolicyDrivenPRConfig(ctx context.Context, owner stri
 		ActionsToExemptWhilePinning:             selectedConfig.ControlSettings.ExemptedActions,
 		ImagesToExemptWhilePinning:              selectedConfig.ControlSettings.ExemptedImages,
 		ActionsToReplaceWithStepSecurityActions: actionsToReplace,
+		CustomActionsToReplace:                  selectedConfig.ControlSettings.CustomActionsToReplace,
 		ReplaceByMajorTag:                       selectedConfig.ControlSettings.ReplaceByMajorTag,
 		ExemptedFromReplacement:                 selectedConfig.ControlSettings.ExemptedFromReplacement,
 		UpdatePrecommitFile:                     updatePrecommitFiles,

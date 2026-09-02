@@ -103,3 +103,18 @@ Required:
 
 - `action` (String) `read` or `write`. Some resources expose only `read` (e.g. `audit-logs`, `action-secrets`); the API will reject invalid pairings.
 - `resource` (String) Permission resource name. Must be a valid catalog entry — see `GET /v1/{customer}/permissions` or the console role-edit dialog for the canonical list (e.g. `detections`, `run-policies`, `developer-mdm`).
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+#!/bin/bash
+
+# Roles can be imported using the role's UUID.
+# The UUID is visible in the console (Admin Console → Roles)
+# or via `GET /v1/{customer}/roles`.
+terraform import stepsecurity_role.developer 00000000-0000-0000-0000-000000000000
+```

@@ -168,6 +168,11 @@ func (r *policyDrivenPRResource) Schema(_ context.Context, _ resource.SchemaRequ
 							),
 						),
 					},
+					"custom_actions_to_replace": schema.MapAttribute{
+						ElementType: types.StringType,
+						Optional:    true,
+						Description: "Map of actions to replace with custom replacements. Keys are the original action names, values are the replacement action names chosen by the customer.",
+					},
 					"replace_action_on_major_tag_match": schema.BoolAttribute{
 						Optional:    true,
 						Computed:    true,
@@ -406,8 +411,8 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 				map[string]attr.Value{
 					"package":       types.StringValue(ecosystem.Package),
 					"interval":      types.StringValue(ecosystem.Interval),
-					"cooldown_yaml": types.StringValue(ecosystem.CoolDownYAML),
-					"groups_yaml":   types.StringValue(ecosystem.GroupsYAML),
+					"cooldown_yaml": stringOrNull(ecosystem.CoolDownYAML),
+					"groups_yaml":   stringOrNull(ecosystem.GroupsYAML),
 				},
 			)
 			ecosystemObjects = append(ecosystemObjects, obj)
@@ -464,6 +469,17 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 		actionCommitMapValue = types.MapNull(types.StringType)
 	}
 
+	var customActionsToReplaceValue types.Map
+	if len(policy.AutoRemdiationOptions.CustomActionsToReplace) > 0 {
+		mapElements := make(map[string]attr.Value)
+		for key, value := range policy.AutoRemdiationOptions.CustomActionsToReplace {
+			mapElements[key] = types.StringValue(value)
+		}
+		customActionsToReplaceValue, _ = types.MapValue(types.StringType, mapElements)
+	} else {
+		customActionsToReplaceValue = types.MapNull(types.StringType)
+	}
+
 	var labelsToReplaceValue types.Map
 	if len(policy.AutoRemdiationOptions.LabelsToReplace) > 0 {
 		mapElements := make(map[string]attr.Value)
@@ -488,6 +504,7 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 			"actions_to_exempt_while_pinning":               types.ListType{ElemType: types.StringType},
 			"images_to_exempt_while_pinning":                types.ListType{ElemType: types.StringType},
 			"actions_to_replace_with_step_security_actions": types.ListType{ElemType: types.StringType},
+			"custom_actions_to_replace":                     types.MapType{ElemType: types.StringType},
 			"replace_action_on_major_tag_match":             types.BoolType,
 			"actions_exempted_from_replacement":             types.ListType{ElemType: types.StringType},
 			"update_precommit_file":                         types.ListType{ElemType: types.StringType},
@@ -523,6 +540,7 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 			"actions_to_exempt_while_pinning":               exemptList,
 			"images_to_exempt_while_pinning":                exemptImagesList,
 			"actions_to_replace_with_step_security_actions": replaceList,
+			"custom_actions_to_replace":                     customActionsToReplaceValue,
 			"replace_action_on_major_tag_match": types.BoolValue(func() bool {
 				if policy.AutoRemdiationOptions.ReplaceByMajorTag != nil {
 					return *policy.AutoRemdiationOptions.ReplaceByMajorTag
@@ -562,7 +580,7 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 							"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 						},
 						map[string]attr.Value{
-							"config":                        types.StringValue(policy.AutoRemdiationOptions.HardenRunnerConfig.Config),
+							"config":                        stringOrNull(policy.AutoRemdiationOptions.HardenRunnerConfig.Config),
 							"update_existing_configuration": types.BoolValue(policy.AutoRemdiationOptions.HardenRunnerConfig.Subtractive),
 							"target_runner_labels":          labelsList,
 							"exempt_runner_labels":          exemptLabelsSet,
@@ -611,6 +629,7 @@ type autoRemdiationOptionsModel struct {
 	ActionsToExemptWhilePinning             types.List   `tfsdk:"actions_to_exempt_while_pinning"`
 	ImagesToExemptWhilePinning              types.List   `tfsdk:"images_to_exempt_while_pinning"`
 	ActionsToReplaceWithStepSecurityActions types.List   `tfsdk:"actions_to_replace_with_step_security_actions"`
+	CustomActionsToReplace                  types.Map    `tfsdk:"custom_actions_to_replace"`
 	ReplaceByMajorTag                       types.Bool   `tfsdk:"replace_action_on_major_tag_match"`
 	ExemptedFromReplacement                 types.List   `tfsdk:"actions_exempted_from_replacement"`
 	UpdatePrecommitFile                     types.List   `tfsdk:"update_precommit_file"`
@@ -974,6 +993,14 @@ func (r *policyDrivenPRResource) Create(ctx context.Context, req resource.Create
 		}
 	}
 
+	var customActionsToReplace map[string]string
+	if !options.CustomActionsToReplace.IsNull() && !options.CustomActionsToReplace.IsUnknown() {
+		customActionsToReplace = make(map[string]string)
+		for key, value := range options.CustomActionsToReplace.Elements() {
+			customActionsToReplace[key] = value.(types.String).ValueString()
+		}
+	}
+
 	var labelsToReplace map[string]string
 	if !options.LabelsToReplace.IsNull() {
 		labelsToReplace = make(map[string]string)
@@ -1042,6 +1069,7 @@ func (r *policyDrivenPRResource) Create(ctx context.Context, req resource.Create
 			ActionsToExemptWhilePinning:             actionsToExempt,
 			ImagesToExemptWhilePinning:              imagesToExempt,
 			ActionsToReplaceWithStepSecurityActions: actionsToReplace,
+			CustomActionsToReplace:                  customActionsToReplace,
 			ReplaceByMajorTag:                       replaceByMajorTag,
 			ExemptedFromReplacement:                 exemptedFromReplacement,
 			UpdatePrecommitFile:                     updatePrecommitFile,
@@ -1542,6 +1570,14 @@ func (r *policyDrivenPRResource) Update(ctx context.Context, req resource.Update
 		actionCommitMapPlan = map[string]string{}
 	}
 
+	var customActionsToReplacePlan map[string]string
+	if !planOptions.CustomActionsToReplace.IsNull() && !planOptions.CustomActionsToReplace.IsUnknown() {
+		customActionsToReplacePlan = make(map[string]string)
+		for key, value := range planOptions.CustomActionsToReplace.Elements() {
+			customActionsToReplacePlan[key] = value.(types.String).ValueString()
+		}
+	}
+
 	var labelsToReplacePlan map[string]string
 	if !planOptions.LabelsToReplace.IsNull() {
 		labelsToReplacePlan = make(map[string]string)
@@ -1609,6 +1645,7 @@ func (r *policyDrivenPRResource) Update(ctx context.Context, req resource.Update
 			ActionsToExemptWhilePinning:             actionsToExempt,
 			ImagesToExemptWhilePinning:              imagesToExempt,
 			ActionsToReplaceWithStepSecurityActions: actionsToReplace,
+			CustomActionsToReplace:                  customActionsToReplacePlan,
 			ReplaceByMajorTag:                       replaceByMajorTagUpdate,
 			ExemptedFromReplacement:                 exemptedFromReplacementUpdate,
 			UpdatePrecommitFile:                     updatePrecommitFilePlan,
@@ -1778,8 +1815,8 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 				map[string]attr.Value{
 					"package":       types.StringValue(ecosystem.Package),
 					"interval":      types.StringValue(ecosystem.Interval),
-					"cooldown_yaml": types.StringValue(ecosystem.CoolDownYAML),
-					"groups_yaml":   types.StringValue(ecosystem.GroupsYAML),
+					"cooldown_yaml": stringOrNull(ecosystem.CoolDownYAML),
+					"groups_yaml":   stringOrNull(ecosystem.GroupsYAML),
 				},
 			)
 			ecosystemObjects = append(ecosystemObjects, obj)
@@ -1836,6 +1873,17 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 		actionCommitMapValue = types.MapNull(types.StringType)
 	}
 
+	var customActionsToReplaceValue types.Map
+	if len(stepSecurityPolicy.AutoRemdiationOptions.CustomActionsToReplace) > 0 {
+		mapElements := make(map[string]attr.Value)
+		for key, value := range stepSecurityPolicy.AutoRemdiationOptions.CustomActionsToReplace {
+			mapElements[key] = types.StringValue(value)
+		}
+		customActionsToReplaceValue, _ = types.MapValue(types.StringType, mapElements)
+	} else {
+		customActionsToReplaceValue = types.MapNull(types.StringType)
+	}
+
 	var labelsToReplaceValue types.Map
 	if len(stepSecurityPolicy.AutoRemdiationOptions.LabelsToReplace) > 0 {
 		mapElements := make(map[string]attr.Value)
@@ -1860,6 +1908,7 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 			"actions_to_exempt_while_pinning":               types.ListType{ElemType: types.StringType},
 			"images_to_exempt_while_pinning":                types.ListType{ElemType: types.StringType},
 			"actions_to_replace_with_step_security_actions": types.ListType{ElemType: types.StringType},
+			"custom_actions_to_replace":                     types.MapType{ElemType: types.StringType},
 			"replace_action_on_major_tag_match":             types.BoolType,
 			"actions_exempted_from_replacement":             types.ListType{ElemType: types.StringType},
 			"update_precommit_file":                         types.ListType{ElemType: types.StringType},
@@ -1895,6 +1944,7 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 			"actions_to_exempt_while_pinning":               exemptList,
 			"images_to_exempt_while_pinning":                exemptImagesList,
 			"actions_to_replace_with_step_security_actions": replaceList,
+			"custom_actions_to_replace":                     customActionsToReplaceValue,
 			"replace_action_on_major_tag_match": types.BoolValue(func() bool {
 				if stepSecurityPolicy.AutoRemdiationOptions.ReplaceByMajorTag != nil {
 					return *stepSecurityPolicy.AutoRemdiationOptions.ReplaceByMajorTag
@@ -1934,7 +1984,7 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 							"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 						},
 						map[string]attr.Value{
-							"config":                        types.StringValue(stepSecurityPolicy.AutoRemdiationOptions.HardenRunnerConfig.Config),
+							"config":                        stringOrNull(stepSecurityPolicy.AutoRemdiationOptions.HardenRunnerConfig.Config),
 							"update_existing_configuration": types.BoolValue(stepSecurityPolicy.AutoRemdiationOptions.HardenRunnerConfig.Subtractive),
 							"target_runner_labels":          labelsList,
 							"exempt_runner_labels":          exemptLabelsSet,
@@ -1980,7 +2030,93 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 	}
 }
 
+// stringOrNull maps an absent API string to null rather than to the empty string.
+//
+// cooldown_yaml, groups_yaml and harden_runner_config.config are Optional with no
+// default, so a configuration that omits them holds null. All three are omitempty on the
+// wire, so the API returns them absent and Go decodes that to "". Writing types.StringValue("")
+// into state therefore disagrees with the plan on every refresh. Terraform counts that as
+// a change but renders empty-string-vs-null as unchanged, producing a plan that reports
+// "1 to change" with no attribute diff shown at all.
+func stringOrNull(s string) types.String {
+	if s == "" {
+		return types.StringNull()
+	}
+	return types.StringValue(s)
+}
+
+// listToStrings extracts a []string from a types.List of strings, skipping any
+// element that is not a known string value.
+func listToStrings(list types.List) []string {
+	out := make([]string, 0, len(list.Elements()))
+	for _, e := range list.Elements() {
+		s, ok := e.(types.String)
+		if !ok || s.IsNull() || s.IsUnknown() {
+			continue
+		}
+		out = append(out, s.ValueString())
+	}
+	return out
+}
+
+// alignListOrder reorders apiList to follow stateList's ordering for the elements the
+// two have in common, appending any element that only the API returned in the order the
+// API returned it.
+//
+// The API stores some of these lists as JSON objects, which unmarshal into Go maps, so
+// the read path has to derive a list from a randomized map range. Sorting that list (see
+// GetPolicyDrivenPRPolicy) makes each read self-consistent but does not match the order
+// the practitioner wrote in their configuration, so a config that is not already sorted
+// gets a permanent reordering diff. Realigning to the prior state's order removes that
+// diff while still surfacing genuine membership changes: an element the API dropped
+// disappears and an element the API added shows up at the end.
+//
+// Returns ok=false when apiList is already in the desired order, so callers can avoid
+// rebuilding the enclosing object for no reason.
+func alignListOrder(ctx context.Context, stateList, apiList types.List) (types.List, bool) {
+	if stateList.IsNull() || stateList.IsUnknown() || apiList.IsNull() || apiList.IsUnknown() {
+		return apiList, false
+	}
+
+	stateElems := listToStrings(stateList)
+	apiElems := listToStrings(apiList)
+	if len(apiElems) == 0 {
+		return apiList, false
+	}
+
+	// Track occurrences rather than mere presence so duplicated elements survive.
+	remaining := make(map[string]int, len(apiElems))
+	for _, e := range apiElems {
+		remaining[e]++
+	}
+
+	aligned := make([]string, 0, len(apiElems))
+	for _, e := range stateElems {
+		if remaining[e] > 0 {
+			remaining[e]--
+			aligned = append(aligned, e)
+		}
+	}
+	for _, e := range apiElems {
+		if remaining[e] > 0 {
+			remaining[e]--
+			aligned = append(aligned, e)
+		}
+	}
+
+	if slices.Equal(aligned, apiElems) {
+		return apiList, false
+	}
+
+	alignedList, diags := types.ListValueFrom(ctx, types.StringType, aligned)
+	if diags.HasError() {
+		return apiList, false
+	}
+	return alignedList, true
+}
+
 // preserveAutoRemediationListOrder prevents spurious diffs caused by the API returning
+// the elements of a list attribute in an order that differs from the configured order.
 func (r *policyDrivenPRResource) preserveAutoRemediationListOrder(ctx context.Context, currentStateOptions autoRemdiationOptionsModel, state *policyDrivenPRModel) {
 	if state.AutoRemdiationOptions.IsNull() || state.AutoRemdiationOptions.IsUnknown() {
 		return
@@ -1989,43 +2125,29 @@ func (r *policyDrivenPRResource) preserveAutoRemediationListOrder(ctx context.Co
 	attrs := state.AutoRemdiationOptions.Attributes()
 	changed := false
 
-	// preserveOrder replaces attrs[key] with stateList when both contain the same elements.
+	// preserveOrder rewrites attrs[key] so it follows stateList's ordering.
 	preserveOrder := func(key string, stateList types.List) {
-		if stateList.IsNull() || stateList.IsUnknown() {
+		apiList, ok := attrs[key].(types.List)
+		if !ok {
 			return
 		}
-		newList, ok := attrs[key].(types.List)
-		if !ok || newList.IsNull() || newList.IsUnknown() {
+		aligned, ok := alignListOrder(ctx, stateList, apiList)
+		if !ok {
 			return
 		}
-
-		stateElems := make([]string, 0, len(stateList.Elements()))
-		for _, e := range stateList.Elements() {
-			stateElems = append(stateElems, e.(types.String).ValueString())
-		}
-		newElems := make([]string, 0, len(newList.Elements()))
-		for _, e := range newList.Elements() {
-			newElems = append(newElems, e.(types.String).ValueString())
-		}
-
-		if len(stateElems) != len(newElems) {
-			return
-		}
-		stateSorted := make([]string, len(stateElems))
-		copy(stateSorted, stateElems)
-		newSorted := make([]string, len(newElems))
-		copy(newSorted, newElems)
-		slices.Sort(stateSorted)
-		slices.Sort(newSorted)
-		if slices.Equal(stateSorted, newSorted) {
-			attrs[key] = stateList
-			changed = true
-		}
+		attrs[key] = aligned
+		changed = true
 	}
 
 	preserveOrder("actions_to_replace_with_step_security_actions", currentStateOptions.ActionsToReplaceWithStepSecurityActions)
 	preserveOrder("actions_to_exempt_while_pinning", currentStateOptions.ActionsToExemptWhilePinning)
 	preserveOrder("images_to_exempt_while_pinning", currentStateOptions.ImagesToExemptWhilePinning)
+	preserveOrder("actions_exempted_from_replacement", currentStateOptions.ExemptedFromReplacement)
+	preserveOrder("update_precommit_file", currentStateOptions.UpdatePrecommitFile)
+
+	if r.preserveHardenRunnerLabelOrder(ctx, currentStateOptions, attrs) {
+		changed = true
+	}
 
 	if !changed {
 		return
@@ -2042,4 +2164,45 @@ func (r *policyDrivenPRResource) preserveAutoRemediationListOrder(ctx context.Co
 		return
 	}
 	state.AutoRemdiationOptions = updatedObj
+}
+
+// preserveHardenRunnerLabelOrder applies the same ordering fix to
+// harden_runner_config.target_runner_labels, which lives one level down in a nested
+// object. It mutates attrs in place and reports whether it changed anything.
+func (r *policyDrivenPRResource) preserveHardenRunnerLabelOrder(ctx context.Context, currentStateOptions autoRemdiationOptionsModel, attrs map[string]attr.Value) bool {
+	stateConfig := currentStateOptions.HardenRunnerConfig
+	if stateConfig.IsNull() || stateConfig.IsUnknown() {
+		return false
+	}
+	var stateModel hardenRunnerConfigModel
+	if diags := stateConfig.As(ctx, &stateModel, basetypes.ObjectAsOptions{}); diags.HasError() {
+		return false
+	}
+
+	apiConfig, ok := attrs["harden_runner_config"].(types.Object)
+	if !ok || apiConfig.IsNull() || apiConfig.IsUnknown() {
+		return false
+	}
+	configAttrs := apiConfig.Attributes()
+	apiLabels, ok := configAttrs["target_runner_labels"].(types.List)
+	if !ok {
+		return false
+	}
+
+	aligned, ok := alignListOrder(ctx, stateModel.RunnerLabels, apiLabels)
+	if !ok {
+		return false
+	}
+	configAttrs["target_runner_labels"] = aligned
+
+	objType, ok := apiConfig.Type(ctx).(basetypes.ObjectType)
+	if !ok {
+		return false
+	}
+	updatedConfig, diags := types.ObjectValue(objType.AttrTypes, configAttrs)
+	if diags.HasError() {
+		return false
+	}
+	attrs["harden_runner_config"] = updatedConfig
+	return true
 }

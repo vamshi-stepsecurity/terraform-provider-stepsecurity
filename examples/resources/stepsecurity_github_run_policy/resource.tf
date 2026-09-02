@@ -83,6 +83,25 @@ resource "stepsecurity_github_run_policy" "runner_policy_all_repos" {
   }
 }
 
+# Runner Label Policy Example (generic labels) - Blocks every GitHub-hosted
+# standard runner via the enable_standard_runner_labels boolean: the standard
+# label set (ubuntu-latest, windows-latest, macos-*, arm variants, ...) is
+# added to disallowed_runner_labels at evaluation time and kept up to date
+# automatically. Additional custom labels can still be listed.
+resource "stepsecurity_github_run_policy" "runner_policy_generic_labels" {
+  owner     = "my-org"
+  name      = "Runner Label Policy - Generic Labels"
+  all_repos = true
+
+  policy_config = {
+    owner                         = "my-org"
+    name                          = "Runner Label Policy - Generic Labels"
+    enable_runs_on_policy         = true
+    enable_standard_runner_labels = true
+    disallowed_runner_labels      = ["self-hosted"]
+  }
+}
+
 # Runner Label Policy Example (all_orgs) - Restricts which runners can be used across all orgs
 resource "stepsecurity_github_run_policy" "runner_policy_all_orgs" {
   owner    = "my-org"
@@ -123,6 +142,26 @@ resource "stepsecurity_github_run_policy" "harden_runner_policy_targeted" {
     name                        = "Harden Runner Policy - Targeted"
     enable_harden_runner_policy = true
     harden_runner_target_labels = ["ubuntu-step-security", "linux-secure"]
+  }
+}
+
+# Harden Runner Policy Example (generic labels) - Enforces Harden Runner on
+# every job running on a GitHub-hosted standard runner via the
+# enable_standard_runner_labels boolean: the standard label set (ubuntu-latest,
+# windows-latest, macos-*, arm variants, ...) becomes the target labels at
+# evaluation time and stays current automatically. Self-hosted jobs are not
+# targeted; add harden_runner_target_labels entries to also target custom
+# runners.
+resource "stepsecurity_github_run_policy" "harden_runner_policy_generic_labels" {
+  owner     = "my-org"
+  name      = "Harden Runner Policy - Generic Labels"
+  all_repos = true
+
+  policy_config = {
+    owner                         = "my-org"
+    name                          = "Harden Runner Policy - Generic Labels"
+    enable_harden_runner_policy   = true
+    enable_standard_runner_labels = true
   }
 }
 
@@ -325,6 +364,27 @@ resource "stepsecurity_github_run_policy" "pinned_actions_policy" {
   }
 }
 
+# Allowed Actions Policy Example (pinning only, every action allowed)
+# require_pinned_actions is a sub-feature of the allowed actions policy, so
+# enable_action_policy must be true and the allow list is evaluated alongside it.
+# Use the global wildcard "*/*" to allow every action, leaving the pinning
+# requirement as the only thing this policy enforces.
+resource "stepsecurity_github_run_policy" "pinning_only_policy" {
+  owner     = "my-org"
+  name      = "Allowed Actions Policy - Pinning Only"
+  all_repos = true
+
+  policy_config = {
+    owner                  = "my-org"
+    name                   = "Allowed Actions Policy - Pinning Only"
+    enable_action_policy   = true
+    require_pinned_actions = true
+    allowed_actions = {
+      "*/*" = "allow"
+    }
+  }
+}
+
 # Allowed Actions Policy Example (dry_run, pinned actions enforcement)
 resource "stepsecurity_github_run_policy" "pinned_actions_policy_dry_run" {
   owner     = "my-org"
@@ -341,6 +401,70 @@ resource "stepsecurity_github_run_policy" "pinned_actions_policy_dry_run" {
       "step-security/harden-runner" = "allow"
     }
     is_dry_run = true
+  }
+}
+
+# Runner Label Policy Example (allowed mode) - Instead of a block list, only
+# permit jobs whose runners are on an allow list. runs_on_mode defaults to
+# "disallowed" (block list, using disallowed_runner_labels); set it to "allowed"
+# to switch to allow-list behavior. Plain labels are matched verbatim, while
+# runs-on.com constraints are matched per dimension: a runs-on token of the form
+# key=value is allowed when the key is unconfigured, or when its value is listed
+# for that key.
+resource "stepsecurity_github_run_policy" "runner_policy_allowed_mode" {
+  owner     = "my-org"
+  name      = "Runner Label Policy - Allowed Mode"
+  all_repos = true
+
+  policy_config = {
+    owner                 = "my-org"
+    name                  = "Runner Label Policy - Allowed Mode"
+    enable_runs_on_policy = true
+    runs_on_mode          = "allowed"
+    allowed_runner_labels = ["ubuntu-latest", "ubuntu-22.04"]
+    allowed_runner_constraints = {
+      family = ["c7a", "m7a"]
+      cpu    = ["2", "4", "8"]
+    }
+  }
+}
+
+# Harden Runner Policy Example (opt-in checks) - In addition to requiring Harden
+# Runner on targeted jobs, require every targeted job to read its configuration
+# from the policy store (use-policy-store: true on the Harden Runner step; the
+# legacy policy: input does not satisfy this check), and block jobs that run
+# entirely inside a job-level container: (Harden Runner cannot monitor a fully
+# containerized job on GitHub-hosted standard runners; container steps are fine).
+resource "stepsecurity_github_run_policy" "harden_runner_policy_checks" {
+  owner     = "my-org"
+  name      = "Harden Runner Policy - Policy Store and Container"
+  all_repos = true
+
+  policy_config = {
+    owner                       = "my-org"
+    name                        = "Harden Runner Policy - Policy Store and Container"
+    enable_harden_runner_policy = true
+    harden_runner_target_labels = []
+    require_policy_store        = true
+    block_job_container         = true
+  }
+}
+
+# Secrets Policy Example (analyze default branch) - By default the secrets policy
+# only evaluates non-default-branch runs; enable secrets_analyze_default_branch to
+# also evaluate runs on the repository default branch. Pairs well with
+# bulk_secrets_only_mode to limit enforcement to high-risk bulk exposure.
+resource "stepsecurity_github_run_policy" "secrets_policy_default_branch" {
+  owner     = "my-org"
+  name      = "Secrets Policy - Analyze Default Branch"
+  all_repos = true
+
+  policy_config = {
+    owner                          = "my-org"
+    name                           = "Secrets Policy - Analyze Default Branch"
+    enable_secrets_policy          = true
+    secrets_analyze_default_branch = true
+    bulk_secrets_only_mode         = true
   }
 }
 

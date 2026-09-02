@@ -756,6 +756,16 @@ func testRunPolicyConfigObjectValue(policyConfig policyConfigModel) types.Object
 		pinnedActionsExemptions = types.SetNull(types.StringType)
 	}
 
+	allowedRunnerLabels := policyConfig.AllowedRunnerLabels
+	if reflect.DeepEqual(allowedRunnerLabels, types.Set{}) {
+		allowedRunnerLabels = types.SetNull(types.StringType)
+	}
+
+	allowedRunnerConstraints := policyConfig.AllowedRunnerConstraints
+	if reflect.DeepEqual(allowedRunnerConstraints, types.Map{}) {
+		allowedRunnerConstraints = types.MapNull(types.SetType{ElemType: types.StringType})
+	}
+
 	return types.ObjectValueMust(map[string]attr.Type{
 		"owner":                             types.StringType,
 		"name":                              types.StringType,
@@ -765,6 +775,7 @@ func testRunPolicyConfigObjectValue(policyConfig policyConfigModel) types.Object
 		"harden_runner_target_labels":       types.SetType{ElemType: types.StringType},
 		"harden_runner_custom_actions":      types.SetType{ElemType: types.StringType},
 		"enable_runs_on_policy":             types.BoolType,
+		"enable_standard_runner_labels":     types.BoolType,
 		"disallowed_runner_labels":          types.SetType{ElemType: types.StringType},
 		"enable_secrets_policy":             types.BoolType,
 		"enable_compromised_actions_policy": types.BoolType,
@@ -774,6 +785,12 @@ func testRunPolicyConfigObjectValue(policyConfig policyConfigModel) types.Object
 		"exempted_users":                    types.SetType{ElemType: types.StringType},
 		"bulk_secrets_only_mode":            types.BoolType,
 		"pr_comment_template":               types.StringType,
+		"runs_on_mode":                      types.StringType,
+		"allowed_runner_labels":             types.SetType{ElemType: types.StringType},
+		"allowed_runner_constraints":        types.MapType{ElemType: types.SetType{ElemType: types.StringType}},
+		"require_policy_store":              types.BoolType,
+		"block_job_container":               types.BoolType,
+		"secrets_analyze_default_branch":    types.BoolType,
 	}, map[string]attr.Value{
 		"owner":                             policyConfig.Owner,
 		"name":                              policyConfig.Name,
@@ -783,6 +800,7 @@ func testRunPolicyConfigObjectValue(policyConfig policyConfigModel) types.Object
 		"harden_runner_target_labels":       policyConfig.HardenRunnerTargetLabels,
 		"harden_runner_custom_actions":      policyConfig.HardenRunnerCustomActions,
 		"enable_runs_on_policy":             policyConfig.EnableRunsOnPolicy,
+		"enable_standard_runner_labels":     policyConfig.EnableStandardRunnerLabels,
 		"disallowed_runner_labels":          policyConfig.DisallowedRunnerLabels,
 		"enable_secrets_policy":             policyConfig.EnableSecretsPolicy,
 		"enable_compromised_actions_policy": policyConfig.EnableCompromisedActionsPolicy,
@@ -792,6 +810,12 @@ func testRunPolicyConfigObjectValue(policyConfig policyConfigModel) types.Object
 		"exempted_users":                    policyConfig.ExemptedUsers,
 		"bulk_secrets_only_mode":            policyConfig.BulkSecretsOnlyMode,
 		"pr_comment_template":               policyConfig.PrCommentTemplate,
+		"runs_on_mode":                      policyConfig.RunsOnMode,
+		"allowed_runner_labels":             allowedRunnerLabels,
+		"allowed_runner_constraints":        allowedRunnerConstraints,
+		"require_policy_store":              policyConfig.RequirePolicyStore,
+		"block_job_container":               policyConfig.BlockJobContainer,
+		"secrets_analyze_default_branch":    policyConfig.SecretsAnalyzeDefaultBranch,
 	})
 }
 

@@ -114,3 +114,27 @@ resource "stepsecurity_github_checks" "test-organization-maven" {
     repos = ["*"] # applies to all repositories in the organization
   }
 }
+
+# github PR checks configuration with NuGet controls
+resource "stepsecurity_github_checks" "test-organization-nuget" {
+  owner = "test-organization"
+  controls = [
+    {
+      control = "NuGet Package Cooldown"
+      enable  = true
+      type    = "required"
+      settings = {
+        cool_down_period                     = 3
+        packages_to_exempt_in_cooldown_check = ["MyCompany.Internal.Lib"]
+      }
+    },
+    {
+      control = "NuGet Package Compromised Updates"
+      enable  = true
+      type    = "required"
+    }
+  ]
+  required_checks = {
+    repos = ["*"] # applies to all repositories in the organization
+  }
+}

@@ -7,8 +7,10 @@ import (
 	"regexp"
 	"testing"
 
+	fwdatasource "github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
@@ -86,6 +88,45 @@ func TestStepSecurityProvider(t *testing.T) {
 				t.Error("Expected at least one resource")
 			}
 		})
+	}
+}
+
+func TestStepSecurityProvider_DeveloperMDMRegistration(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := New("test")()
+
+	resourceNames := map[string]bool{}
+	for _, factory := range p.Resources(ctx) {
+		resp := &fwresource.MetadataResponse{}
+		factory().Metadata(ctx, fwresource.MetadataRequest{ProviderTypeName: "stepsecurity"}, resp)
+		resourceNames[resp.TypeName] = true
+	}
+	for _, name := range []string{
+		"stepsecurity_developer_mdm_ide_extension_policy",
+		"stepsecurity_developer_mdm_package_config_policy",
+		"stepsecurity_developer_mdm_profile",
+	} {
+		if !resourceNames[name] {
+			t.Errorf("expected resource %q to be registered", name)
+		}
+	}
+
+	dataSourceNames := map[string]bool{}
+	for _, factory := range p.DataSources(ctx) {
+		resp := &fwdatasource.MetadataResponse{}
+		factory().Metadata(ctx, fwdatasource.MetadataRequest{ProviderTypeName: "stepsecurity"}, resp)
+		dataSourceNames[resp.TypeName] = true
+	}
+	for _, name := range []string{
+		"stepsecurity_developer_mdm_profile_export",
+		"stepsecurity_developer_mdm_device_compliance",
+		"stepsecurity_developer_mdm_profile_compliance",
+	} {
+		if !dataSourceNames[name] {
+			t.Errorf("expected data source %q to be registered", name)
+		}
 	}
 }
 

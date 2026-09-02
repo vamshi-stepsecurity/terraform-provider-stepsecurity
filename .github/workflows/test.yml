@@ -57,9 +57,19 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      # The plan-stability tests drive a real Terraform CLI against an httptest fake
+      # backend. Providing the CLI here keeps them from skipping; without it they would
+      # skip rather than have the test harness download one, since hc-install cannot
+      # currently verify HashiCorp's release signature ("openpgp: key expired").
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.5.7"
+          terraform_wrapper: false
+
       - name: Run go tests
         run: go test -race ./...
-        
+
   docs-check:
     name: Check Documentation
     runs-on: ubuntu-latest

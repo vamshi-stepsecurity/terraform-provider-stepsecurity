@@ -9,11 +9,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
 	stepsecurityapi "github.com/step-security/terraform-provider-stepsecurity/internal/stepsecurity-api"
@@ -102,12 +104,12 @@ func (r *githubChecksResource) Schema(_ context.Context, _ resource.SchemaReques
 									Optional:    true,
 									Computed:    true,
 									Default:     int64default.StaticInt64(2),
-									Description: "Cooldown period values (e.g., days). Only applicable to npm/PyPI cooldown checks. Default is 2 days.",
+									Description: "Cooldown period values (e.g., days). Only applicable to npm/PyPI/Maven/NuGet cooldown checks. Default is 2 days.",
 								},
 								"packages_to_exempt_in_cooldown_check": schema.ListAttribute{
 									Optional:    true,
 									ElementType: types.StringType,
-									Description: "Package names to exempt from cooldown checks. Only applicable to npm/PyPI cooldown checks.",
+									Description: "Package names to exempt from cooldown checks. Only applicable to npm/PyPI/Maven/NuGet cooldown checks.",
 								},
 							},
 						},
@@ -187,12 +189,12 @@ func (r *githubChecksResource) ImportState(ctx context.Context, req resource.Imp
 }
 
 type githubChecksModel struct {
-	Owner             types.String  `tfsdk:"owner"`
-	Controls          []control     `tfsdk:"controls"`
-	RequiredChecks    *checksConfig `tfsdk:"required_checks"`
-	OptionalChecks    *checksConfig `tfsdk:"optional_checks"`
-	BaselineCheck     *checksConfig `tfsdk:"baseline_check"`
-	CustomDescription types.String  `tfsdk:"custom_description"`
+	Owner             types.String `tfsdk:"owner"`
+	Controls          types.List   `tfsdk:"controls"`
+	RequiredChecks    types.Object `tfsdk:"required_checks"`
+	OptionalChecks    types.Object `tfsdk:"optional_checks"`
+	BaselineCheck     types.Object `tfsdk:"baseline_check"`
+	CustomDescription types.String `tfsdk:"custom_description"`
 }
 
 type checksConfig struct {
@@ -200,11 +202,97 @@ type checksConfig struct {
 	OmitRepos types.List `tfsdk:"omit_repos"`
 }
 
+// checksConfigAttrTypes returns the attribute types of a required_checks/optional_checks/
+// baseline_check object.
+func checksConfigAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"repos":      types.ListType{ElemType: types.StringType},
+		"omit_repos": types.ListType{ElemType: types.StringType},
+	}
+}
+
+// decodeChecksConfig decodes a required_checks/optional_checks/baseline_check types.Object
+// into a *checksConfig. It returns nil (no error) when the object is null OR unknown; every
+// caller already treats a nil *checksConfig as "not configured, skip", which is also the
+// correct behavior to defer to a later plan when the whole object isn't known yet. Binding an
+// unknown object into a plain *checksConfig (rather than types.Object) is what caused a
+// customer-reported crash for required_checks.
+func decodeChecksConfig(ctx context.Context, obj types.Object) (*checksConfig, diag.Diagnostics) {
+	if obj.IsNull() || obj.IsUnknown() {
+		return nil, nil
+	}
+	var c checksConfig
+	diags := obj.As(ctx, &c, basetypes.ObjectAsOptions{})
+	if diags.HasError() {
+		return nil, diags
+	}
+	return &c, nil
+}
+
+// encodeChecksConfig converts a *checksConfig back into the types.Object it is bound to,
+// producing a null object when cfg is nil. Repos/OmitRepos are normalized to a properly
+// typed null list when left as the Go zero value types.List{} (no element type set) —
+// building the object via reflection (ObjectValueFrom) on that zero value fails a strict
+// type check and silently degrades to an Unknown object, which would reintroduce the
+// unknown-value crash this type is meant to prevent.
+func encodeChecksConfig(_ context.Context, cfg *checksConfig) types.Object {
+	if cfg == nil {
+		return types.ObjectNull(checksConfigAttrTypes())
+	}
+	repos := cfg.Repos
+	if repos.IsNull() {
+		repos = types.ListNull(types.StringType)
+	}
+	omitRepos := cfg.OmitRepos
+	if omitRepos.IsNull() {
+		omitRepos = types.ListNull(types.StringType)
+	}
+	obj, _ := types.ObjectValue(checksConfigAttrTypes(), map[string]attr.Value{
+		"repos":      repos,
+		"omit_repos": omitRepos,
+	})
+	return obj
+}
+
 type control struct {
 	Control  types.String `tfsdk:"control"`
 	Enable   types.Bool   `tfsdk:"enable"`
 	Type     types.String `tfsdk:"type"`
 	Settings types.Object `tfsdk:"settings"`
+}
+
+// controlSettingsAttrTypes returns the attribute types for a control's "settings" object.
+func controlSettingsAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"cool_down_period":                     types.Int64Type,
+		"packages_to_exempt_in_cooldown_check": types.ListType{ElemType: types.StringType},
+	}
+}
+
+// controlObjectType returns the object type of a single element of the "controls" list.
+// The "controls" attribute is bound to types.List (rather than a plain Go slice) so that
+// the framework can represent an unknown list value (e.g. when it is derived from a value
+// that is not known until apply); a plain []control cannot represent "unknown".
+func controlObjectType() types.ObjectType {
+	return types.ObjectType{
+		AttrTypes: map[string]attr.Type{
+			"control": types.StringType,
+			"enable":  types.BoolType,
+			"type":    types.StringType,
+			"settings": types.ObjectType{
+				AttrTypes: controlSettingsAttrTypes(),
+			},
+		},
+	}
+}
+
+// diagsToError flattens error diagnostics into a single error.
+func diagsToError(diags diag.Diagnostics) error {
+	msgs := make([]string, 0, len(diags))
+	for _, d := range diags.Errors() {
+		msgs = append(msgs, fmt.Sprintf("%s: %s", d.Summary(), d.Detail()))
+	}
+	return fmt.Errorf("%s", strings.Join(msgs, "; "))
 }
 
 func (r *githubChecksResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
@@ -222,76 +310,107 @@ func (r *githubChecksResource) ValidateConfig(ctx context.Context, req resource.
 		)
 	}
 
-	if len(config.Controls) == 0 {
-		resp.Diagnostics.AddError(
-			"Controls are required",
-			"Controls are required to create a GitHub Checks resource",
-		)
+	requiredChecks, diags2 := decodeChecksConfig(ctx, config.RequiredChecks)
+	resp.Diagnostics.Append(diags2...)
+	optionalChecks, diags3 := decodeChecksConfig(ctx, config.OptionalChecks)
+	resp.Diagnostics.Append(diags3...)
+	baselineCheck, diags4 := decodeChecksConfig(ctx, config.BaselineCheck)
+	resp.Diagnostics.Append(diags4...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	hasRequired := false
 	hasOptional := false
-	for _, control := range config.Controls {
-		// Skip validation if control attributes are unknown (e.g., when using for_each or count)
-		if control.Control.IsUnknown() || control.Type.IsUnknown() || control.Enable.IsUnknown() {
-			continue
+	// controlsIndeterminate is true whenever we could not fully evaluate every control's
+	// type/enable state (the whole list is unknown, or an individual control's fields are
+	// unknown). In that case hasRequired/hasOptional cannot be trusted, so cross-checks that
+	// depend on them must be skipped until a later plan when the values are known.
+	controlsIndeterminate := false
+
+	if config.Controls.IsUnknown() {
+		// The whole controls list is unknown (e.g., it is derived from a value that
+		// isn't known until apply, such as a for_each over an unresolved collection).
+		// Skip control-level validation until the value is known; it will be
+		// re-validated on a subsequent plan.
+		controlsIndeterminate = true
+	} else if config.Controls.IsNull() || len(config.Controls.Elements()) == 0 {
+		resp.Diagnostics.AddError(
+			"Controls are required",
+			"Controls are required to create a GitHub Checks resource",
+		)
+	} else {
+		var controls []control
+		diags = config.Controls.ElementsAs(ctx, &controls, false)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
 		}
 
-		if _, ok := stepsecurityapi.AvailableControls[control.Control.ValueString()]; !ok {
-			resp.Diagnostics.AddError(
-				"Invalid control provided",
-				"only the following controls are accepted to configure: "+strings.Join(stepsecurityapi.GetAvailableControls(), ", \n"),
-			)
-		}
+		for _, control := range controls {
+			// Skip validation if control attributes are unknown (e.g., when using for_each or count)
+			if control.Control.IsUnknown() || control.Type.IsUnknown() || control.Enable.IsUnknown() {
+				controlsIndeterminate = true
+				continue
+			}
 
-		if control.Type.ValueString() == "required" && control.Enable.ValueBool() {
-			hasRequired = true
-		}
-		if control.Type.ValueString() == "optional" && control.Enable.ValueBool() {
-			hasOptional = true
-		}
-		if control.Type.ValueString() != "required" && control.Type.ValueString() != "optional" {
-			resp.Diagnostics.AddError(
-				"Type can only be 'required' or 'optional'",
-				"Type can only be 'required' or 'optional'",
-			)
-		}
+			if _, ok := stepsecurityapi.AvailableControls[control.Control.ValueString()]; !ok {
+				resp.Diagnostics.AddError(
+					"Invalid control provided",
+					"only the following controls are accepted to configure: "+strings.Join(stepsecurityapi.GetAvailableControls(), ", \n"),
+				)
+			}
 
-		isCooldownControl := control.Control.ValueString() == "NPM Package Cooldown" ||
-			control.Control.ValueString() == "PyPI Package Cooldown" ||
-			control.Control.ValueString() == "Maven Package Cooldown"
-		if !isCooldownControl && !control.Settings.IsNull() && !control.Settings.IsUnknown() {
-			resp.Diagnostics.AddError(
-				"can't provide settings",
-				"can't provide settings for control "+control.Control.ValueString(),
-			)
-		}
+			if control.Type.ValueString() == "required" && control.Enable.ValueBool() {
+				hasRequired = true
+			}
+			if control.Type.ValueString() == "optional" && control.Enable.ValueBool() {
+				hasOptional = true
+			}
+			if control.Type.ValueString() != "required" && control.Type.ValueString() != "optional" {
+				resp.Diagnostics.AddError(
+					"Type can only be 'required' or 'optional'",
+					"Type can only be 'required' or 'optional'",
+				)
+			}
 
-		if isCooldownControl && !control.Settings.IsNull() && !control.Settings.IsUnknown() {
-			// Extract cooldown period from the object
-			if cooldownAttr := control.Settings.Attributes()["cool_down_period"]; cooldownAttr != nil {
-				if cooldownValue, ok := cooldownAttr.(types.Int64); ok {
-					period := cooldownValue.ValueInt64()
-					if period != 0 && (period < 1 || period > 30) {
-						resp.Diagnostics.AddError(
-							"cool_down_period should be between 1 and 30",
-							"cool_down_period should be between 1 and 30 for control "+control.Control.ValueString(),
-						)
+			isCooldownControl := control.Control.ValueString() == "NPM Package Cooldown" ||
+				control.Control.ValueString() == "PyPI Package Cooldown" ||
+				control.Control.ValueString() == "Maven Package Cooldown" ||
+				control.Control.ValueString() == "NuGet Package Cooldown"
+			if !isCooldownControl && !control.Settings.IsNull() && !control.Settings.IsUnknown() {
+				resp.Diagnostics.AddError(
+					"can't provide settings",
+					"can't provide settings for control "+control.Control.ValueString(),
+				)
+			}
+
+			if isCooldownControl && !control.Settings.IsNull() && !control.Settings.IsUnknown() {
+				// Extract cooldown period from the object
+				if cooldownAttr := control.Settings.Attributes()["cool_down_period"]; cooldownAttr != nil {
+					if cooldownValue, ok := cooldownAttr.(types.Int64); ok {
+						period := cooldownValue.ValueInt64()
+						if period != 0 && (period < 1 || period > 30) {
+							resp.Diagnostics.AddError(
+								"cool_down_period should be between 1 and 30",
+								"cool_down_period should be between 1 and 30 for control "+control.Control.ValueString(),
+							)
+						}
 					}
 				}
 			}
-		}
 
+		}
 	}
 
-	if config.RequiredChecks != nil && len(config.RequiredChecks.Repos.Elements()) != 0 && !hasRequired {
+	if !controlsIndeterminate && requiredChecks != nil && len(requiredChecks.Repos.Elements()) != 0 && !hasRequired {
 		resp.Diagnostics.AddError(
 			"can't provide repos for required checks without enabling any control for required checks",
 			"No control of type 'required' is enabled to apply to the repos",
 		)
 	}
 
-	if config.OptionalChecks != nil && len(config.OptionalChecks.Repos.Elements()) != 0 && !hasOptional {
+	if !controlsIndeterminate && optionalChecks != nil && len(optionalChecks.Repos.Elements()) != 0 && !hasOptional {
 		resp.Diagnostics.AddError(
 			"can't provide repos for optional checks without enabling any control for optional checks",
 			"No control of type 'optional' is enabled to apply to the repos",
@@ -302,24 +421,24 @@ func (r *githubChecksResource) ValidateConfig(ctx context.Context, req resource.
 	isOptionalCheckAppliedForAllRepos := false
 	isBaselineCheckAppliedForAllRepos := false
 
-	if config.RequiredChecks != nil && !config.RequiredChecks.Repos.IsUnknown() {
-		for _, repo := range config.RequiredChecks.Repos.Elements() {
+	if requiredChecks != nil && !requiredChecks.Repos.IsUnknown() {
+		for _, repo := range requiredChecks.Repos.Elements() {
 			repoStr, ok := repo.(types.String)
 			if ok && !repoStr.IsUnknown() && repoStr.ValueString() == "*" {
 				isRequiredCheckAppliedForAllRepos = true
 			}
 		}
 	}
-	if config.OptionalChecks != nil && !config.OptionalChecks.Repos.IsUnknown() {
-		for _, repo := range config.OptionalChecks.Repos.Elements() {
+	if optionalChecks != nil && !optionalChecks.Repos.IsUnknown() {
+		for _, repo := range optionalChecks.Repos.Elements() {
 			repoStr, ok := repo.(types.String)
 			if ok && !repoStr.IsUnknown() && repoStr.ValueString() == "*" {
 				isOptionalCheckAppliedForAllRepos = true
 			}
 		}
 	}
-	if config.BaselineCheck != nil && !config.BaselineCheck.Repos.IsUnknown() {
-		for _, repo := range config.BaselineCheck.Repos.Elements() {
+	if baselineCheck != nil && !baselineCheck.Repos.IsUnknown() {
+		for _, repo := range baselineCheck.Repos.Elements() {
 			repoStr, ok := repo.(types.String)
 			if ok && !repoStr.IsUnknown() && repoStr.ValueString() == "*" {
 				isBaselineCheckAppliedForAllRepos = true
@@ -327,13 +446,13 @@ func (r *githubChecksResource) ValidateConfig(ctx context.Context, req resource.
 		}
 	}
 
-	if config.RequiredChecks != nil {
-		if !config.RequiredChecks.OmitRepos.IsUnknown() && !isRequiredCheckAppliedForAllRepos && len(config.RequiredChecks.OmitRepos.Elements()) != 0 {
+	if requiredChecks != nil {
+		if !requiredChecks.OmitRepos.IsUnknown() && !isRequiredCheckAppliedForAllRepos && len(requiredChecks.OmitRepos.Elements()) != 0 {
 			resp.Diagnostics.AddError(
 				"can't provide omit_repos for required checks without enabling it for all repos",
 				"omit_repos can only be provided when repos is set to '*'",
 			)
-		} else if !config.RequiredChecks.Repos.IsUnknown() && isRequiredCheckAppliedForAllRepos && len(config.RequiredChecks.Repos.Elements()) != 1 {
+		} else if !requiredChecks.Repos.IsUnknown() && isRequiredCheckAppliedForAllRepos && len(requiredChecks.Repos.Elements()) != 1 {
 			resp.Diagnostics.AddError(
 				"can't provide additional values for repos for required checks when repos set to '*'",
 				"additional values for repos are not allowed when repos have a value '*'",
@@ -341,13 +460,13 @@ func (r *githubChecksResource) ValidateConfig(ctx context.Context, req resource.
 		}
 	}
 
-	if config.OptionalChecks != nil {
-		if !config.OptionalChecks.OmitRepos.IsUnknown() && !isOptionalCheckAppliedForAllRepos && len(config.OptionalChecks.OmitRepos.Elements()) != 0 {
+	if optionalChecks != nil {
+		if !optionalChecks.OmitRepos.IsUnknown() && !isOptionalCheckAppliedForAllRepos && len(optionalChecks.OmitRepos.Elements()) != 0 {
 			resp.Diagnostics.AddError(
 				"can't provide omit_repos for optional checks without enabling it for all repos",
 				"omit_repos can only be provided when repos is set to '*'",
 			)
-		} else if !config.OptionalChecks.Repos.IsUnknown() && isOptionalCheckAppliedForAllRepos && len(config.OptionalChecks.Repos.Elements()) != 1 {
+		} else if !optionalChecks.Repos.IsUnknown() && isOptionalCheckAppliedForAllRepos && len(optionalChecks.Repos.Elements()) != 1 {
 			resp.Diagnostics.AddError(
 				"can't provide additional values for repos for optional checks when repos set to '*'",
 				"additional values for repos are not allowed when repos have a value '*'",
@@ -355,13 +474,13 @@ func (r *githubChecksResource) ValidateConfig(ctx context.Context, req resource.
 		}
 	}
 
-	if config.BaselineCheck != nil {
-		if !config.BaselineCheck.OmitRepos.IsUnknown() && !isBaselineCheckAppliedForAllRepos && len(config.BaselineCheck.OmitRepos.Elements()) != 0 {
+	if baselineCheck != nil {
+		if !baselineCheck.OmitRepos.IsUnknown() && !isBaselineCheckAppliedForAllRepos && len(baselineCheck.OmitRepos.Elements()) != 0 {
 			resp.Diagnostics.AddError(
 				"can't provide omit_repos for baseline checks without enabling it for all repos",
 				"omit_repos can only be provided when repos is set to '*'",
 			)
-		} else if !config.BaselineCheck.Repos.IsUnknown() && isBaselineCheckAppliedForAllRepos && len(config.BaselineCheck.Repos.Elements()) != 1 {
+		} else if !baselineCheck.Repos.IsUnknown() && isBaselineCheckAppliedForAllRepos && len(baselineCheck.Repos.Elements()) != 1 {
 			resp.Diagnostics.AddError(
 				"can't provide additional values for repos for baseline checks when repos set to '*'",
 				"additional values for repos are not allowed when repos have a value '*'",
@@ -386,32 +505,45 @@ func (r *githubChecksResource) ModifyPlan(ctx context.Context, req resource.Modi
 		return
 	}
 
+	if plan.Controls.IsUnknown() || plan.Controls.IsNull() {
+		return
+	}
+
+	var controls []control
+	diags = plan.Controls.ElementsAs(ctx, &controls, false)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	modified := false
 
-	for ind, control := range plan.Controls {
+	for ind, control := range controls {
 
 		if (control.Control.ValueString() == "NPM Package Cooldown" ||
 			control.Control.ValueString() == "PyPI Package Cooldown" ||
-			control.Control.ValueString() == "Maven Package Cooldown") && control.Settings.IsNull() {
+			control.Control.ValueString() == "Maven Package Cooldown" ||
+			control.Control.ValueString() == "NuGet Package Cooldown") && control.Settings.IsNull() {
 			// Create object with default settings
 			settingsMap := map[string]attr.Value{
 				"cool_down_period":                     types.Int64Value(2),
 				"packages_to_exempt_in_cooldown_check": types.ListNull(types.StringType),
 			}
-			settingsType := types.ObjectType{
-				AttrTypes: map[string]attr.Type{
-					"cool_down_period":                     types.Int64Type,
-					"packages_to_exempt_in_cooldown_check": types.ListType{ElemType: types.StringType},
-				},
-			}
-			control.Settings, _ = types.ObjectValue(settingsType.AttrTypes, settingsMap)
-			plan.Controls[ind] = control
+			control.Settings, _ = types.ObjectValue(controlSettingsAttrTypes(), settingsMap)
+			controls[ind] = control
 			modified = true
 		}
 	}
 
 	// Set the plan back (either because it was modified )
 	if modified {
+		newControls, listDiags := types.ListValueFrom(ctx, controlObjectType(), controls)
+		resp.Diagnostics.Append(listDiags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.Controls = newControls
+
 		diags = resp.Plan.Set(ctx, plan)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
@@ -430,7 +562,7 @@ func (r *githubChecksResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
-	createRequest, err := r.convertToCreateRequest(plan)
+	createRequest, err := r.convertToCreateRequest(ctx, plan)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating GitHub Checks",
@@ -448,7 +580,7 @@ func (r *githubChecksResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
-	state := r.convertToState(plan.Owner.ValueString(), *createRequest)
+	state := r.convertToState(ctx, plan.Owner.ValueString(), *createRequest)
 	state.Owner = types.StringValue(plan.Owner.ValueString())
 	r.updateStateListsWithOrderFromPlan(ctx, plan, &state)
 
@@ -478,7 +610,7 @@ func (r *githubChecksResource) Read(ctx context.Context, req resource.ReadReques
 		return
 	}
 
-	newState := r.convertToState(state.Owner.ValueString(), config)
+	newState := r.convertToState(ctx, state.Owner.ValueString(), config)
 	r.updateStateListsWithOrderFromPlan(ctx, state, &newState)
 
 	diags = resp.State.Set(ctx, newState)
@@ -497,7 +629,7 @@ func (r *githubChecksResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	updateRequest, err := r.convertToCreateRequest(plan)
+	updateRequest, err := r.convertToCreateRequest(ctx, plan)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating GitHub Checks",
@@ -515,7 +647,7 @@ func (r *githubChecksResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	state := r.convertToState(plan.Owner.ValueString(), *updateRequest)
+	state := r.convertToState(ctx, plan.Owner.ValueString(), *updateRequest)
 	state.Owner = types.StringValue(plan.Owner.ValueString())
 	r.updateStateListsWithOrderFromPlan(ctx, plan, &state)
 
@@ -555,16 +687,38 @@ func (r *githubChecksResource) Delete(ctx context.Context, req resource.DeleteRe
 
 }
 
-func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*stepsecurityapi.GitHubPRChecksConfig, error) {
+func (r *githubChecksResource) convertToCreateRequest(ctx context.Context, plan githubChecksModel) (*stepsecurityapi.GitHubPRChecksConfig, error) {
 	prChecksConfig := stepsecurityapi.GitHubPRChecksConfig{}
 	prChecksConfig.Checks = make(map[string]stepsecurityapi.CheckConfig)
-	for _, control := range plan.Controls {
+
+	var controls []control
+	if !plan.Controls.IsNull() && !plan.Controls.IsUnknown() {
+		diags := plan.Controls.ElementsAs(ctx, &controls, false)
+		if diags.HasError() {
+			return nil, diagsToError(diags)
+		}
+	}
+
+	requiredChecks, diags := decodeChecksConfig(ctx, plan.RequiredChecks)
+	if diags.HasError() {
+		return nil, diagsToError(diags)
+	}
+	optionalChecks, diags := decodeChecksConfig(ctx, plan.OptionalChecks)
+	if diags.HasError() {
+		return nil, diagsToError(diags)
+	}
+	baselineCheck, diags := decodeChecksConfig(ctx, plan.BaselineCheck)
+	if diags.HasError() {
+		return nil, diagsToError(diags)
+	}
+
+	for _, control := range controls {
 		controlName := control.Control.ValueString()
 		checkConfig := stepsecurityapi.CheckConfig{
 			Enabled: control.Enable.ValueBool(),
 			Type:    control.Type.ValueString(),
 		}
-		if controlName == "NPM Package Cooldown" || controlName == "PyPI Package Cooldown" || controlName == "Maven Package Cooldown" {
+		if controlName == "NPM Package Cooldown" || controlName == "PyPI Package Cooldown" || controlName == "Maven Package Cooldown" || controlName == "NuGet Package Cooldown" {
 			if control.Settings.IsNull() {
 				control.Settings = types.ObjectNull(map[string]attr.Type{
 					"cool_down_period":                     types.Int64Type,
@@ -606,8 +760,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 	isOptionalCheckAppliedForAllRepos := false
 	isBaselineCheckAppliedForAllRepos := false
 
-	if plan.RequiredChecks != nil {
-		for _, repo := range plan.RequiredChecks.Repos.Elements() {
+	if requiredChecks != nil {
+		for _, repo := range requiredChecks.Repos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if repoName == "*" {
 				isRequiredCheckAppliedForAllRepos = true
@@ -616,8 +770,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 		}
 	}
 
-	if plan.OptionalChecks != nil {
-		for _, repo := range plan.OptionalChecks.Repos.Elements() {
+	if optionalChecks != nil {
+		for _, repo := range optionalChecks.Repos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if repoName == "*" {
 				isOptionalCheckAppliedForAllRepos = true
@@ -626,8 +780,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 		}
 	}
 
-	if plan.BaselineCheck != nil {
-		for _, repo := range plan.BaselineCheck.Repos.Elements() {
+	if baselineCheck != nil {
+		for _, repo := range baselineCheck.Repos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if repoName == "*" {
 				isBaselineCheckAppliedForAllRepos = true
@@ -637,8 +791,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 	}
 
 	repos := map[string]stepsecurityapi.CheckOptions{}
-	if plan.RequiredChecks != nil {
-		for _, repo := range plan.RequiredChecks.Repos.Elements() {
+	if requiredChecks != nil {
+		for _, repo := range requiredChecks.Repos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if repoName == "*" {
 				continue
@@ -651,8 +805,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 		}
 	}
 
-	if plan.OptionalChecks != nil {
-		for _, repo := range plan.OptionalChecks.Repos.Elements() {
+	if optionalChecks != nil {
+		for _, repo := range optionalChecks.Repos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if repoName == "*" {
 				continue
@@ -670,8 +824,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 		}
 	}
 
-	if plan.BaselineCheck != nil {
-		for _, repo := range plan.BaselineCheck.Repos.Elements() {
+	if baselineCheck != nil {
+		for _, repo := range baselineCheck.Repos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if repoName == "*" {
 				continue
@@ -690,8 +844,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 	}
 
 	// process omit repos
-	if isRequiredCheckAppliedForAllRepos && plan.RequiredChecks != nil {
-		for _, repo := range plan.RequiredChecks.OmitRepos.Elements() {
+	if isRequiredCheckAppliedForAllRepos && requiredChecks != nil {
+		for _, repo := range requiredChecks.OmitRepos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if val, ok := repos[repoName]; ok {
 				val.RunRequiredChecks = false
@@ -705,8 +859,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 			}
 		}
 	}
-	if isOptionalCheckAppliedForAllRepos && plan.OptionalChecks != nil {
-		for _, repo := range plan.OptionalChecks.OmitRepos.Elements() {
+	if isOptionalCheckAppliedForAllRepos && optionalChecks != nil {
+		for _, repo := range optionalChecks.OmitRepos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if val, ok := repos[repoName]; ok {
 				val.RunOptionalChecks = false
@@ -720,8 +874,8 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 			}
 		}
 	}
-	if isBaselineCheckAppliedForAllRepos && plan.BaselineCheck != nil {
-		for _, repo := range plan.BaselineCheck.OmitRepos.Elements() {
+	if isBaselineCheckAppliedForAllRepos && baselineCheck != nil {
+		for _, repo := range baselineCheck.OmitRepos.Elements() {
 			repoName := repo.(types.String).ValueString()
 			if val, ok := repos[repoName]; ok {
 				val.Baseline = false
@@ -746,7 +900,7 @@ func (r *githubChecksResource) convertToCreateRequest(plan githubChecksModel) (*
 	return &prChecksConfig, nil
 }
 
-func (r *githubChecksResource) convertToState(owner string, config stepsecurityapi.GitHubPRChecksConfig) githubChecksModel {
+func (r *githubChecksResource) convertToState(ctx context.Context, owner string, config stepsecurityapi.GitHubPRChecksConfig) githubChecksModel {
 	model := githubChecksModel{}
 	model.Owner = types.StringValue(owner)
 	if config.CustomDescription != "" {
@@ -755,8 +909,8 @@ func (r *githubChecksResource) convertToState(owner string, config stepsecuritya
 		model.CustomDescription = types.StringNull()
 	}
 
-	// Initialize Controls as empty slice instead of nil
-	model.Controls = []control{}
+	// Initialize controls as an empty slice instead of nil
+	controls := []control{}
 
 	// Don't initialize pointer fields yet - only initialize them if needed
 
@@ -772,7 +926,7 @@ func (r *githubChecksResource) convertToState(owner string, config stepsecuritya
 		}
 
 		// Handle settings for cooldown controls
-		if (controlName == "NPM Package Cooldown" || controlName == "PyPI Package Cooldown" || controlName == "Maven Package Cooldown") && checkConfig.Settings != nil {
+		if (controlName == "NPM Package Cooldown" || controlName == "PyPI Package Cooldown" || controlName == "Maven Package Cooldown" || controlName == "NuGet Package Cooldown") && checkConfig.Settings != nil {
 			var cooldownPeriod types.Int64
 			var packagesList types.List
 
@@ -820,53 +974,48 @@ func (r *githubChecksResource) convertToState(owner string, config stepsecuritya
 				"cool_down_period":                     cooldownPeriod,
 				"packages_to_exempt_in_cooldown_check": packagesList,
 			}
-			settingsType := types.ObjectType{
-				AttrTypes: map[string]attr.Type{
-					"cool_down_period":                     types.Int64Type,
-					"packages_to_exempt_in_cooldown_check": types.ListType{ElemType: types.StringType},
-				},
-			}
-			c.Settings, _ = types.ObjectValue(settingsType.AttrTypes, settingsMap)
+			c.Settings, _ = types.ObjectValue(controlSettingsAttrTypes(), settingsMap)
 		} else {
 			// For non-NPM controls or controls without settings, set to null
-			c.Settings = types.ObjectNull(map[string]attr.Type{
-				"cool_down_period":                     types.Int64Type,
-				"packages_to_exempt_in_cooldown_check": types.ListType{ElemType: types.StringType},
-			})
+			c.Settings = types.ObjectNull(controlSettingsAttrTypes())
 		}
 
-		model.Controls = append(model.Controls, c)
+		controls = append(controls, c)
 	}
 
 	// Sort controls by name to ensure deterministic order
 	// This prevents Terraform from detecting changes due to random map iteration order
-	sort.Slice(model.Controls, func(i, j int) bool {
-		return model.Controls[i].Control.ValueString() < model.Controls[j].Control.ValueString()
+	sort.Slice(controls, func(i, j int) bool {
+		return controls[i].Control.ValueString() < controls[j].Control.ValueString()
 	})
+
+	model.Controls, _ = types.ListValueFrom(ctx, controlObjectType(), controls)
 
 	// Flags for applying checks to all repos
 	isBaselineAll := config.EnableBaselineCheckForAllNewRepos != nil && *config.EnableBaselineCheckForAllNewRepos
 	isRequiredAll := config.EnableRequiredChecksForAllNewRepos != nil && *config.EnableRequiredChecksForAllNewRepos
 	isOptionalAll := config.EnableOptionalChecksForAllNewRepos != nil && *config.EnableOptionalChecksForAllNewRepos
 
+	var requiredChecks, optionalChecks, baselineCheck *checksConfig
+
 	// Pre-set '*' lists when applicable
 	if isBaselineAll {
-		if model.BaselineCheck == nil {
-			model.BaselineCheck = &checksConfig{}
+		if baselineCheck == nil {
+			baselineCheck = &checksConfig{}
 		}
-		model.BaselineCheck.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
+		baselineCheck.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
 	}
 	if isRequiredAll {
-		if model.RequiredChecks == nil {
-			model.RequiredChecks = &checksConfig{}
+		if requiredChecks == nil {
+			requiredChecks = &checksConfig{}
 		}
-		model.RequiredChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
+		requiredChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
 	}
 	if isOptionalAll {
-		if model.OptionalChecks == nil {
-			model.OptionalChecks = &checksConfig{}
+		if optionalChecks == nil {
+			optionalChecks = &checksConfig{}
 		}
-		model.OptionalChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
+		optionalChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
 	}
 
 	// Build per-repo lists
@@ -877,7 +1026,20 @@ func (r *githubChecksResource) convertToState(owner string, config stepsecuritya
 	var optionalRepos []attr.Value
 	var optionalOmitRepos []attr.Value
 
-	for name, opts := range config.Repos {
+	// config.Repos is a map, and Go randomizes map iteration order on every range. Iterating
+	// it directly would emit these lists in a different order on each read, so two reads of a
+	// byte-identical API response (e.g. the plan phase and the apply phase of one run) would
+	// disagree on ordering and Terraform would render a spurious reordering diff. Iterating a
+	// sorted key list instead makes every read deterministic. Controls are sorted below for
+	// the same reason.
+	repoNames := make([]string, 0, len(config.Repos))
+	for name := range config.Repos {
+		repoNames = append(repoNames, name)
+	}
+	sort.Strings(repoNames)
+
+	for _, name := range repoNames {
+		opts := config.Repos[name]
 		// Baseline
 		if !isBaselineAll && opts.Baseline {
 			baselineRepos = append(baselineRepos, types.StringValue(name))
@@ -904,7 +1066,7 @@ func (r *githubChecksResource) convertToState(owner string, config stepsecuritya
 	hasRequiredControls := false
 	hasOptionalControls := false
 
-	for _, control := range model.Controls {
+	for _, control := range controls {
 		if control.Enable.ValueBool() {
 			switch control.Type.ValueString() {
 			case "required":
@@ -920,54 +1082,58 @@ func (r *githubChecksResource) convertToState(owner string, config stepsecuritya
 
 	// RequiredChecks - initialize if there are required controls or any required activity
 	if hasRequiredControls || isRequiredAll || len(requiredRepos) > 0 || len(requiredOmitRepos) > 0 {
-		model.RequiredChecks = &checksConfig{}
+		requiredChecks = &checksConfig{}
 		if isRequiredAll {
-			model.RequiredChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
+			requiredChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
 		} else {
-			model.RequiredChecks.Repos, _ = types.ListValue(types.StringType, requiredRepos)
+			requiredChecks.Repos, _ = types.ListValue(types.StringType, requiredRepos)
 		}
 		// Only set OmitRepos if there are actually repos to omit
 		if len(requiredOmitRepos) > 0 {
-			model.RequiredChecks.OmitRepos, _ = types.ListValue(types.StringType, requiredOmitRepos)
+			requiredChecks.OmitRepos, _ = types.ListValue(types.StringType, requiredOmitRepos)
 		} else {
 			// No omit repos - set as typed null
-			model.RequiredChecks.OmitRepos = types.ListNull(types.StringType)
+			requiredChecks.OmitRepos = types.ListNull(types.StringType)
 		}
 	}
 
 	// OptionalChecks - initialize if there are optional controls or any optional activity
 	if hasOptionalControls || isOptionalAll || len(optionalRepos) > 0 || len(optionalOmitRepos) > 0 {
-		model.OptionalChecks = &checksConfig{}
+		optionalChecks = &checksConfig{}
 		if isOptionalAll {
-			model.OptionalChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
+			optionalChecks.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
 		} else {
-			model.OptionalChecks.Repos, _ = types.ListValue(types.StringType, optionalRepos)
+			optionalChecks.Repos, _ = types.ListValue(types.StringType, optionalRepos)
 		}
 		// Only set OmitRepos if there are actually repos to omit
 		if len(optionalOmitRepos) > 0 {
-			model.OptionalChecks.OmitRepos, _ = types.ListValue(types.StringType, optionalOmitRepos)
+			optionalChecks.OmitRepos, _ = types.ListValue(types.StringType, optionalOmitRepos)
 		} else {
 			// No omit repos - set as typed null
-			model.OptionalChecks.OmitRepos = types.ListNull(types.StringType)
+			optionalChecks.OmitRepos = types.ListNull(types.StringType)
 		}
 	}
 
 	// BaselineCheck - initialize if baseline is enabled globally or has any baseline activity
 	if isBaselineAll || len(baselineRepos) > 0 || len(baselineOmitRepos) > 0 {
-		model.BaselineCheck = &checksConfig{}
+		baselineCheck = &checksConfig{}
 		if isBaselineAll {
-			model.BaselineCheck.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
+			baselineCheck.Repos, _ = types.ListValue(types.StringType, []attr.Value{types.StringValue("*")})
 		} else {
-			model.BaselineCheck.Repos, _ = types.ListValue(types.StringType, baselineRepos)
+			baselineCheck.Repos, _ = types.ListValue(types.StringType, baselineRepos)
 		}
 		// Only set OmitRepos if there are actually repos to omit
 		if len(baselineOmitRepos) > 0 {
-			model.BaselineCheck.OmitRepos, _ = types.ListValue(types.StringType, baselineOmitRepos)
+			baselineCheck.OmitRepos, _ = types.ListValue(types.StringType, baselineOmitRepos)
 		} else {
 			// No omit repos - set as typed null
-			model.BaselineCheck.OmitRepos = types.ListNull(types.StringType)
+			baselineCheck.OmitRepos = types.ListNull(types.StringType)
 		}
 	}
+
+	model.RequiredChecks = encodeChecksConfig(ctx, requiredChecks)
+	model.OptionalChecks = encodeChecksConfig(ctx, optionalChecks)
+	model.BaselineCheck = encodeChecksConfig(ctx, baselineCheck)
 
 	return model
 }
@@ -977,58 +1143,113 @@ func (r *githubChecksResource) updateStateListsWithOrderFromPlan(ctx context.Con
 		return
 	}
 
+	planRequiredChecks, diags := decodeChecksConfig(ctx, plan.RequiredChecks)
+	if diags.HasError() {
+		return
+	}
+	stateRequiredChecks, diags := decodeChecksConfig(ctx, state.RequiredChecks)
+	if diags.HasError() {
+		return
+	}
+	planOptionalChecks, diags := decodeChecksConfig(ctx, plan.OptionalChecks)
+	if diags.HasError() {
+		return
+	}
+	stateOptionalChecks, diags := decodeChecksConfig(ctx, state.OptionalChecks)
+	if diags.HasError() {
+		return
+	}
+	planBaselineCheck, diags := decodeChecksConfig(ctx, plan.BaselineCheck)
+	if diags.HasError() {
+		return
+	}
+	stateBaselineCheck, diags := decodeChecksConfig(ctx, state.BaselineCheck)
+	if diags.HasError() {
+		return
+	}
+
 	// Update state with plan if the lists are equal for required checks
-	if plan.RequiredChecks != nil && state.RequiredChecks != nil {
-		planRepos := r.listToStringSlice(plan.RequiredChecks.Repos)
-		stateRepos := r.listToStringSlice(state.RequiredChecks.Repos)
+	if planRequiredChecks != nil && stateRequiredChecks != nil {
+		changed := false
+		planRepos := r.listToStringSlice(planRequiredChecks.Repos)
+		stateRepos := r.listToStringSlice(stateRequiredChecks.Repos)
 		if cmp.Equal(planRepos, stateRepos, cmpopts.SortSlices(func(a, b string) bool { return a < b })) {
-			state.RequiredChecks.Repos = plan.RequiredChecks.Repos
+			stateRequiredChecks.Repos = planRequiredChecks.Repos
+			changed = true
 		}
-		planOmitRepos := r.listToStringSlice(plan.RequiredChecks.OmitRepos)
-		stateOmitRepos := r.listToStringSlice(state.RequiredChecks.OmitRepos)
+		planOmitRepos := r.listToStringSlice(planRequiredChecks.OmitRepos)
+		stateOmitRepos := r.listToStringSlice(stateRequiredChecks.OmitRepos)
 		if cmp.Equal(planOmitRepos, stateOmitRepos, cmpopts.SortSlices(func(a, b string) bool { return a < b })) {
-			state.RequiredChecks.OmitRepos = plan.RequiredChecks.OmitRepos
+			stateRequiredChecks.OmitRepos = planRequiredChecks.OmitRepos
+			changed = true
+		}
+		if changed {
+			state.RequiredChecks = encodeChecksConfig(ctx, stateRequiredChecks)
 		}
 	}
 
 	// Update state with plan if the lists are equal for optional checks
-	if plan.OptionalChecks != nil && state.OptionalChecks != nil {
-		planRepos := r.listToStringSlice(plan.OptionalChecks.Repos)
-		stateRepos := r.listToStringSlice(state.OptionalChecks.Repos)
+	if planOptionalChecks != nil && stateOptionalChecks != nil {
+		changed := false
+		planRepos := r.listToStringSlice(planOptionalChecks.Repos)
+		stateRepos := r.listToStringSlice(stateOptionalChecks.Repos)
 		if cmp.Equal(planRepos, stateRepos, cmpopts.SortSlices(func(a, b string) bool { return a < b })) {
-			state.OptionalChecks.Repos = plan.OptionalChecks.Repos
+			stateOptionalChecks.Repos = planOptionalChecks.Repos
+			changed = true
 		}
-		planOmitRepos := r.listToStringSlice(plan.OptionalChecks.OmitRepos)
-		stateOmitRepos := r.listToStringSlice(state.OptionalChecks.OmitRepos)
+		planOmitRepos := r.listToStringSlice(planOptionalChecks.OmitRepos)
+		stateOmitRepos := r.listToStringSlice(stateOptionalChecks.OmitRepos)
 		if cmp.Equal(planOmitRepos, stateOmitRepos, cmpopts.SortSlices(func(a, b string) bool { return a < b })) {
-			state.OptionalChecks.OmitRepos = plan.OptionalChecks.OmitRepos
+			stateOptionalChecks.OmitRepos = planOptionalChecks.OmitRepos
+			changed = true
+		}
+		if changed {
+			state.OptionalChecks = encodeChecksConfig(ctx, stateOptionalChecks)
 		}
 	}
 
 	// Update state with plan if the lists are equal for baseline checks
-	if plan.BaselineCheck != nil && state.BaselineCheck != nil {
-		planRepos := r.listToStringSlice(plan.BaselineCheck.Repos)
-		stateRepos := r.listToStringSlice(state.BaselineCheck.Repos)
+	if planBaselineCheck != nil && stateBaselineCheck != nil {
+		changed := false
+		planRepos := r.listToStringSlice(planBaselineCheck.Repos)
+		stateRepos := r.listToStringSlice(stateBaselineCheck.Repos)
 		if cmp.Equal(planRepos, stateRepos, cmpopts.SortSlices(func(a, b string) bool { return a < b })) {
-			state.BaselineCheck.Repos = plan.BaselineCheck.Repos
+			stateBaselineCheck.Repos = planBaselineCheck.Repos
+			changed = true
 		}
-		planOmitRepos := r.listToStringSlice(plan.BaselineCheck.OmitRepos)
-		stateOmitRepos := r.listToStringSlice(state.BaselineCheck.OmitRepos)
+		planOmitRepos := r.listToStringSlice(planBaselineCheck.OmitRepos)
+		stateOmitRepos := r.listToStringSlice(stateBaselineCheck.OmitRepos)
 		if cmp.Equal(planOmitRepos, stateOmitRepos, cmpopts.SortSlices(func(a, b string) bool { return a < b })) {
-			state.BaselineCheck.OmitRepos = plan.BaselineCheck.OmitRepos
+			stateBaselineCheck.OmitRepos = planBaselineCheck.OmitRepos
+			changed = true
+		}
+		if changed {
+			state.BaselineCheck = encodeChecksConfig(ctx, stateBaselineCheck)
 		}
 	}
 
 	// preserve order of controls
+	if plan.Controls.IsUnknown() || plan.Controls.IsNull() || state.Controls.IsUnknown() || state.Controls.IsNull() {
+		return
+	}
+
+	var planControls, stateControls []control
+	if diags := plan.Controls.ElementsAs(ctx, &planControls, false); diags.HasError() {
+		return
+	}
+	if diags := state.Controls.ElementsAs(ctx, &stateControls, false); diags.HasError() {
+		return
+	}
+
 	// Create a map of controls from state for efficient lookup
 	controls2Map := make(map[string]control)
-	for _, ctrl := range state.Controls {
+	for _, ctrl := range stateControls {
 		controls2Map[ctrl.Control.ValueString()] = ctrl
 	}
 
 	// Reorder state controls to match plan order
-	orderedControls := make([]control, 0, len(plan.Controls))
-	for _, ctrl := range plan.Controls {
+	orderedControls := make([]control, 0, len(planControls))
+	for _, ctrl := range planControls {
 		if _, exists := controls2Map[ctrl.Control.ValueString()]; !exists {
 			tflog.Info(ctx, "Control not found in state", map[string]any{
 				"control": ctrl.Control.ValueString(),
@@ -1037,7 +1258,7 @@ func (r *githubChecksResource) updateStateListsWithOrderFromPlan(ctx context.Con
 		}
 		orderedControls = append(orderedControls, controls2Map[ctrl.Control.ValueString()])
 	}
-	state.Controls = orderedControls
+	state.Controls, _ = types.ListValueFrom(ctx, controlObjectType(), orderedControls)
 
 }
 

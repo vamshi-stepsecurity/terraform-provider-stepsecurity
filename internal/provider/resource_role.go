@@ -102,7 +102,7 @@ func (r *roleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Description: "Free-form description shown next to the role in the console. Max 256 chars.",
 			},
 			"permissions": schema.ListNestedAttribute{
-				Required: true,
+				Required:   true,
 				Validators: []validator.List{
 					// Empty permissions list is rejected by the API; surface
 					// it during plan so the user fixes it before apply.

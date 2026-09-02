@@ -98,6 +98,25 @@ resource "stepsecurity_github_run_policy" "runner_policy_all_repos" {
   }
 }
 
+# Runner Label Policy Example (generic labels) - Blocks every GitHub-hosted
+# standard runner via the enable_standard_runner_labels boolean: the standard
+# label set (ubuntu-latest, windows-latest, macos-*, arm variants, ...) is
+# added to disallowed_runner_labels at evaluation time and kept up to date
+# automatically. Additional custom labels can still be listed.
+resource "stepsecurity_github_run_policy" "runner_policy_generic_labels" {
+  owner     = "my-org"
+  name      = "Runner Label Policy - Generic Labels"
+  all_repos = true
+
+  policy_config = {
+    owner                         = "my-org"
+    name                          = "Runner Label Policy - Generic Labels"
+    enable_runs_on_policy         = true
+    enable_standard_runner_labels = true
+    disallowed_runner_labels      = ["self-hosted"]
+  }
+}
+
 # Runner Label Policy Example (all_orgs) - Restricts which runners can be used across all orgs
 resource "stepsecurity_github_run_policy" "runner_policy_all_orgs" {
   owner    = "my-org"
@@ -138,6 +157,26 @@ resource "stepsecurity_github_run_policy" "harden_runner_policy_targeted" {
     name                        = "Harden Runner Policy - Targeted"
     enable_harden_runner_policy = true
     harden_runner_target_labels = ["ubuntu-step-security", "linux-secure"]
+  }
+}
+
+# Harden Runner Policy Example (generic labels) - Enforces Harden Runner on
+# every job running on a GitHub-hosted standard runner via the
+# enable_standard_runner_labels boolean: the standard label set (ubuntu-latest,
+# windows-latest, macos-*, arm variants, ...) becomes the target labels at
+# evaluation time and stays current automatically. Self-hosted jobs are not
+# targeted; add harden_runner_target_labels entries to also target custom
+# runners.
+resource "stepsecurity_github_run_policy" "harden_runner_policy_generic_labels" {
+  owner     = "my-org"
+  name      = "Harden Runner Policy - Generic Labels"
+  all_repos = true
+
+  policy_config = {
+    owner                         = "my-org"
+    name                          = "Harden Runner Policy - Generic Labels"
+    enable_harden_runner_policy   = true
+    enable_standard_runner_labels = true
   }
 }
 
@@ -340,6 +379,27 @@ resource "stepsecurity_github_run_policy" "pinned_actions_policy" {
   }
 }
 
+# Allowed Actions Policy Example (pinning only, every action allowed)
+# require_pinned_actions is a sub-feature of the allowed actions policy, so
+# enable_action_policy must be true and the allow list is evaluated alongside it.
+# Use the global wildcard "*/*" to allow every action, leaving the pinning
+# requirement as the only thing this policy enforces.
+resource "stepsecurity_github_run_policy" "pinning_only_policy" {
+  owner     = "my-org"
+  name      = "Allowed Actions Policy - Pinning Only"
+  all_repos = true
+
+  policy_config = {
+    owner                  = "my-org"
+    name                   = "Allowed Actions Policy - Pinning Only"
+    enable_action_policy   = true
+    require_pinned_actions = true
+    allowed_actions = {
+      "*/*" = "allow"
+    }
+  }
+}
+
 # Allowed Actions Policy Example (dry_run, pinned actions enforcement)
 resource "stepsecurity_github_run_policy" "pinned_actions_policy_dry_run" {
   owner     = "my-org"
@@ -356,6 +416,70 @@ resource "stepsecurity_github_run_policy" "pinned_actions_policy_dry_run" {
       "step-security/harden-runner" = "allow"
     }
     is_dry_run = true
+  }
+}
+
+# Runner Label Policy Example (allowed mode) - Instead of a block list, only
+# permit jobs whose runners are on an allow list. runs_on_mode defaults to
+# "disallowed" (block list, using disallowed_runner_labels); set it to "allowed"
+# to switch to allow-list behavior. Plain labels are matched verbatim, while
+# runs-on.com constraints are matched per dimension: a runs-on token of the form
+# key=value is allowed when the key is unconfigured, or when its value is listed
+# for that key.
+resource "stepsecurity_github_run_policy" "runner_policy_allowed_mode" {
+  owner     = "my-org"
+  name      = "Runner Label Policy - Allowed Mode"
+  all_repos = true
+
+  policy_config = {
+    owner                 = "my-org"
+    name                  = "Runner Label Policy - Allowed Mode"
+    enable_runs_on_policy = true
+    runs_on_mode          = "allowed"
+    allowed_runner_labels = ["ubuntu-latest", "ubuntu-22.04"]
+    allowed_runner_constraints = {
+      family = ["c7a", "m7a"]
+      cpu    = ["2", "4", "8"]
+    }
+  }
+}
+
+# Harden Runner Policy Example (opt-in checks) - In addition to requiring Harden
+# Runner on targeted jobs, require every targeted job to read its configuration
+# from the policy store (use-policy-store: true on the Harden Runner step; the
+# legacy policy: input does not satisfy this check), and block jobs that run
+# entirely inside a job-level container: (Harden Runner cannot monitor a fully
+# containerized job on GitHub-hosted standard runners; container steps are fine).
+resource "stepsecurity_github_run_policy" "harden_runner_policy_checks" {
+  owner     = "my-org"
+  name      = "Harden Runner Policy - Policy Store and Container"
+  all_repos = true
+
+  policy_config = {
+    owner                       = "my-org"
+    name                        = "Harden Runner Policy - Policy Store and Container"
+    enable_harden_runner_policy = true
+    harden_runner_target_labels = []
+    require_policy_store        = true
+    block_job_container         = true
+  }
+}
+
+# Secrets Policy Example (analyze default branch) - By default the secrets policy
+# only evaluates non-default-branch runs; enable secrets_analyze_default_branch to
+# also evaluate runs on the repository default branch. Pairs well with
+# bulk_secrets_only_mode to limit enforcement to high-risk bulk exposure.
+resource "stepsecurity_github_run_policy" "secrets_policy_default_branch" {
+  owner     = "my-org"
+  name      = "Secrets Policy - Analyze Default Branch"
+  all_repos = true
+
+  policy_config = {
+    owner                          = "my-org"
+    name                           = "Secrets Policy - Analyze Default Branch"
+    enable_secrets_policy          = true
+    secrets_analyze_default_branch = true
+    bulk_secrets_only_mode         = true
   }
 }
 
@@ -401,8 +525,11 @@ Required:
 
 Optional:
 
-- `actions_to_exempt_while_pinning` (Set of String) Set of actions exempt from pinning requirements. Supports exact match (e.g., 'actions/checkout'), name-only match, and owner wildcard (e.g., 'my-org/*').
-- `allowed_actions` (Map of String) Map of allowed actions and their permissions (e.g., 'actions/checkout': 'allow').
+- `actions_to_exempt_while_pinning` (Set of String) Set of actions exempt from pinning requirements. Supports exact match (e.g., `actions/checkout@v4`), name-only match (e.g., `actions/checkout`), and owner wildcard (e.g., `my-org/*`). The global wildcard `*/*` is **rejected** by the API here: it would exempt every action from pinning, leaving `require_pinned_actions` enabled but enforcing nothing. To allow any action while still requiring pins, put `*/*` in `allowed_actions` instead.
+- `allowed_actions` (Map of String) Map of allowed actions and their permissions (e.g., `"actions/checkout" = "allow"`). Keys support exact match (`actions/checkout@v4`), name-only match (`actions/checkout`, any ref), owner wildcard (`my-org/*`), and global wildcard (`*/*`, every action). Use `*/*` to allow all actions while still enforcing `require_pinned_actions`.
+- `allowed_runner_constraints` (Map of Set of String) Structured runs-on.com constraints permitted when `runs_on_mode` is `allowed`, keyed by dimension (e.g. `family`, `cpu`, `image`). Each key maps to the set of allowed values for that dimension: a `runs-on` token of the form `key=value` is allowed when the key is unconfigured, or when its value is in the set. Keys are lowercased server-side (use lowercase keys to avoid plan drift) and each key must have at least one value. Expression values are matched by their exact text (whitespace-insensitive), so the `runs-on` routing key itself can be pinned to the conventional expression.
+- `allowed_runner_labels` (Set of String) Set of plain runner labels permitted when `runs_on_mode` is `allowed` (e.g. `ubuntu-latest`). A job is allowed when its `runs-on` label matches an entry verbatim. Ignored in `disallowed` mode.
+- `block_job_container` (Boolean) Sub-feature of the Harden Runner policy. When true, targeted jobs that run entirely inside a job-level `container:` are blocked, because Harden Runner cannot monitor a fully containerized job on GitHub-hosted standard runners. Steps that use containers are unaffected. Only meaningful when `enable_harden_runner_policy` is true.
 - `bulk_secrets_only_mode` (Boolean) When enabled, the secret exfiltration policy restricts enforcement to high-risk bulk secret-exposure attempts rather than all secret references. See the StepSecurity run-policies documentation for details.
 - `disallowed_runner_labels` (Set of String) Set of disallowed runner labels.
 - `enable_action_policy` (Boolean) Whether to enable the action policy.
@@ -410,12 +537,16 @@ Optional:
 - `enable_harden_runner_policy` (Boolean) Whether to enable the Harden Runner policy.
 - `enable_runs_on_policy` (Boolean) Whether to enable the runs-on policy.
 - `enable_secrets_policy` (Boolean) Whether to enable the secrets policy.
+- `enable_standard_runner_labels` (Boolean) When true, the GitHub-hosted standard runner label set (ubuntu-latest, windows-latest, macos-*, arm variants, ...; kept up to date automatically) is added to `disallowed_runner_labels` (runs-on policy) and `harden_runner_target_labels` (Harden Runner policy) at evaluation time.
 - `exempted_users` (Set of String) Set of exempted users (can be bots/usernames) for the secrets exfiltration policy. These users will not be subject to the secrets policy checks.
 - `harden_runner_custom_actions` (Set of String) Set of custom actions accepted as Harden Runner equivalents (in addition to `step-security/harden-runner`).
 - `harden_runner_target_labels` (Set of String) Set of runner labels that target Harden Runner enforcement. Set to `[]` to apply the policy to every job; set a non-empty list to filter to jobs whose `runs-on` matches at least one label. Omitting the attribute leaves any existing backend value untouched (additive-only).
 - `is_dry_run` (Boolean) Whether this policy is in dry-run mode.
 - `pr_comment_template` (String) Optional custom template for the pull request comment posted when this policy blocks a run. Supports placeholder substitution; leave empty to use the default StepSecurity comment.
 - `require_pinned_actions` (Boolean) Whether to require all actions to be pinned to full-length commit SHAs. Sub-feature of the allowed actions policy — only meaningful when `enable_action_policy` is true.
+- `require_policy_store` (Boolean) Sub-feature of the Harden Runner policy. When true, every targeted job's Harden Runner step must set `use-policy-store: true`; a missing or non-`true` value is a violation. The legacy `policy:` input does not satisfy this check. Only meaningful when `enable_harden_runner_policy` is true.
+- `runs_on_mode` (String) Controls how the runs-on policy evaluates runner labels. `disallowed` (the default; an empty string is treated the same) blocks jobs whose `runs-on` matches `disallowed_runner_labels`. `allowed` instead only permits jobs whose `runs-on` matches `allowed_runner_labels` / `allowed_runner_constraints`. Only meaningful when `enable_runs_on_policy` is true.
+- `secrets_analyze_default_branch` (Boolean) Sub-feature of the secrets policy. When true, runs on the repository default branch are also evaluated (by default only non-default-branch runs are). Honors `bulk_secrets_only_mode` and `exempted_users`. Only meaningful when `enable_secrets_policy` is true.
 
 ## Import
 

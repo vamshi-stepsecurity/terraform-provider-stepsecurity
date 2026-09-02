@@ -145,8 +145,8 @@ type FeatureCatalog struct {
 }
 
 type FeatureGroup struct {
-	Name      string                  `json:"name"`
-	Resources []CatalogResource       `json:"resources"`
+	Name      string            `json:"name"`
+	Resources []CatalogResource `json:"resources"`
 }
 
 type CatalogResource struct {
@@ -202,4 +202,3 @@ func fromAPIResponse(r roleAPIResponse) Role {
 		UpdatedBy:   r.UpdatedBy,
 	}
 }
-

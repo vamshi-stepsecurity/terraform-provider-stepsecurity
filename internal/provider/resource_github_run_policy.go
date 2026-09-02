@@ -67,6 +67,7 @@ type policyConfigModel struct {
 	HardenRunnerCustomActions      types.Set    `tfsdk:"harden_runner_custom_actions"`
 	EnableRunsOnPolicy             types.Bool   `tfsdk:"enable_runs_on_policy"`
 	DisallowedRunnerLabels         types.Set    `tfsdk:"disallowed_runner_labels"`
+	EnableStandardRunnerLabels     types.Bool   `tfsdk:"enable_standard_runner_labels"`
 	EnableSecretsPolicy            types.Bool   `tfsdk:"enable_secrets_policy"`
 	EnableCompromisedActionsPolicy types.Bool   `tfsdk:"enable_compromised_actions_policy"`
 	RequirePinnedActions           types.Bool   `tfsdk:"require_pinned_actions"`
@@ -75,6 +76,12 @@ type policyConfigModel struct {
 	ExemptedUsers                  types.Set    `tfsdk:"exempted_users"`
 	BulkSecretsOnlyMode            types.Bool   `tfsdk:"bulk_secrets_only_mode"`
 	PrCommentTemplate              types.String `tfsdk:"pr_comment_template"`
+	RunsOnMode                     types.String `tfsdk:"runs_on_mode"`
+	AllowedRunnerLabels            types.Set    `tfsdk:"allowed_runner_labels"`
+	AllowedRunnerConstraints       types.Map    `tfsdk:"allowed_runner_constraints"`
+	RequirePolicyStore             types.Bool   `tfsdk:"require_policy_store"`
+	BlockJobContainer              types.Bool   `tfsdk:"block_job_container"`
+	SecretsAnalyzeDefaultBranch    types.Bool   `tfsdk:"secrets_analyze_default_branch"`
 }
 
 // Metadata returns the resource type name.
@@ -149,7 +156,7 @@ func (r *githubRunPolicyResource) Schema(_ context.Context, _ resource.SchemaReq
 					"allowed_actions": schema.MapAttribute{
 						ElementType:         types.StringType,
 						Optional:            true,
-						MarkdownDescription: "Map of allowed actions and their permissions (e.g., 'actions/checkout': 'allow').",
+						MarkdownDescription: "Map of allowed actions and their permissions (e.g., `\"actions/checkout\" = \"allow\"`). Keys support exact match (`actions/checkout@v4`), name-only match (`actions/checkout`, any ref), owner wildcard (`my-org/*`), and global wildcard (`*/*`, every action). Use `*/*` to allow all actions while still enforcing `require_pinned_actions`.",
 					},
 					"enable_harden_runner_policy": schema.BoolAttribute{
 						Optional:            true,
@@ -178,6 +185,12 @@ func (r *githubRunPolicyResource) Schema(_ context.Context, _ resource.SchemaReq
 						Optional:            true,
 						MarkdownDescription: "Set of disallowed runner labels.",
 					},
+					"enable_standard_runner_labels": schema.BoolAttribute{
+						Optional:            true,
+						Computed:            true,
+						Default:             booldefault.StaticBool(false),
+						MarkdownDescription: "When true, the GitHub-hosted standard runner label set (ubuntu-latest, windows-latest, macos-*, arm variants, ...; kept up to date automatically) is added to `disallowed_runner_labels` (runs-on policy) and `harden_runner_target_labels` (Harden Runner policy) at evaluation time.",
+					},
 					"enable_secrets_policy": schema.BoolAttribute{
 						Optional:            true,
 						Computed:            true,
@@ -199,7 +212,7 @@ func (r *githubRunPolicyResource) Schema(_ context.Context, _ resource.SchemaReq
 					"actions_to_exempt_while_pinning": schema.SetAttribute{
 						ElementType:         types.StringType,
 						Optional:            true,
-						MarkdownDescription: "Set of actions exempt from pinning requirements. Supports exact match (e.g., 'actions/checkout'), name-only match, and owner wildcard (e.g., 'my-org/*').",
+						MarkdownDescription: "Set of actions exempt from pinning requirements. Supports exact match (e.g., `actions/checkout@v4`), name-only match (e.g., `actions/checkout`), and owner wildcard (e.g., `my-org/*`). The global wildcard `*/*` is **rejected** by the API here: it would exempt every action from pinning, leaving `require_pinned_actions` enabled but enforcing nothing. To allow any action while still requiring pins, put `*/*` in `allowed_actions` instead.",
 					},
 					"is_dry_run": schema.BoolAttribute{
 						Optional:            true,
@@ -223,6 +236,43 @@ func (r *githubRunPolicyResource) Schema(_ context.Context, _ resource.SchemaReq
 						ElementType:         types.StringType,
 						Optional:            true,
 						MarkdownDescription: "Set of exempted users (can be bots/usernames) for the secrets exfiltration policy. These users will not be subject to the secrets policy checks.",
+					},
+					"runs_on_mode": schema.StringAttribute{
+						Optional:            true,
+						Computed:            true,
+						Default:             stringdefault.StaticString(""),
+						MarkdownDescription: "Controls how the runs-on policy evaluates runner labels. `disallowed` (the default; an empty string is treated the same) blocks jobs whose `runs-on` matches `disallowed_runner_labels`. `allowed` instead only permits jobs whose `runs-on` matches `allowed_runner_labels` / `allowed_runner_constraints`. Only meaningful when `enable_runs_on_policy` is true.",
+						Validators: []validator.String{
+							stringvalidator.OneOf("", "disallowed", "allowed"),
+						},
+					},
+					"allowed_runner_labels": schema.SetAttribute{
+						ElementType:         types.StringType,
+						Optional:            true,
+						MarkdownDescription: "Set of plain runner labels permitted when `runs_on_mode` is `allowed` (e.g. `ubuntu-latest`). A job is allowed when its `runs-on` label matches an entry verbatim. Ignored in `disallowed` mode.",
+					},
+					"allowed_runner_constraints": schema.MapAttribute{
+						ElementType:         types.SetType{ElemType: types.StringType},
+						Optional:            true,
+						MarkdownDescription: "Structured runs-on.com constraints permitted when `runs_on_mode` is `allowed`, keyed by dimension (e.g. `family`, `cpu`, `image`). Each key maps to the set of allowed values for that dimension: a `runs-on` token of the form `key=value` is allowed when the key is unconfigured, or when its value is in the set. Keys are lowercased server-side (use lowercase keys to avoid plan drift) and each key must have at least one value. Expression values are matched by their exact text (whitespace-insensitive), so the `runs-on` routing key itself can be pinned to the conventional expression.",
+					},
+					"require_policy_store": schema.BoolAttribute{
+						Optional:            true,
+						Computed:            true,
+						Default:             booldefault.StaticBool(false),
+						MarkdownDescription: "Sub-feature of the Harden Runner policy. When true, every targeted job's Harden Runner step must set `use-policy-store: true`; a missing or non-`true` value is a violation. The legacy `policy:` input does not satisfy this check. Only meaningful when `enable_harden_runner_policy` is true.",
+					},
+					"block_job_container": schema.BoolAttribute{
+						Optional:            true,
+						Computed:            true,
+						Default:             booldefault.StaticBool(false),
+						MarkdownDescription: "Sub-feature of the Harden Runner policy. When true, targeted jobs that run entirely inside a job-level `container:` are blocked, because Harden Runner cannot monitor a fully containerized job on GitHub-hosted standard runners. Steps that use containers are unaffected. Only meaningful when `enable_harden_runner_policy` is true.",
+					},
+					"secrets_analyze_default_branch": schema.BoolAttribute{
+						Optional:            true,
+						Computed:            true,
+						Default:             booldefault.StaticBool(false),
+						MarkdownDescription: "Sub-feature of the secrets policy. When true, runs on the repository default branch are also evaluated (by default only non-default-branch runs are). Honors `bulk_secrets_only_mode` and `exempted_users`. Only meaningful when `enable_secrets_policy` is true.",
 					},
 				},
 			},
@@ -292,12 +342,17 @@ func (r *githubRunPolicyResource) Create(ctx context.Context, req resource.Creat
 			EnableActionPolicy:             policyConfig.EnableActionPolicy.ValueBool(),
 			EnableHardenRunnerPolicy:       policyConfig.EnableHardenRunnerPolicy.ValueBool(),
 			EnableRunsOnPolicy:             policyConfig.EnableRunsOnPolicy.ValueBool(),
+			EnableStandardRunnerLabels:     policyConfig.EnableStandardRunnerLabels.ValueBool(),
 			EnableSecretsPolicy:            policyConfig.EnableSecretsPolicy.ValueBool(),
 			EnableCompromisedActionsPolicy: policyConfig.EnableCompromisedActionsPolicy.ValueBool(),
 			RequirePinnedActions:           policyConfig.RequirePinnedActions.ValueBool(),
 			IsDryRun:                       policyConfig.IsDryRun.ValueBool(),
 			BulkSecretsOnlyMode:            policyConfig.BulkSecretsOnlyMode.ValueBool(),
 			PrCommentTemplate:              policyConfig.PrCommentTemplate.ValueString(),
+			RunsOnMode:                     policyConfig.RunsOnMode.ValueString(),
+			RequirePolicyStore:             policyConfig.RequirePolicyStore.ValueBool(),
+			BlockJobContainer:              policyConfig.BlockJobContainer.ValueBool(),
+			SecretsAnalyzeDefaultBranch:    policyConfig.SecretsAnalyzeDefaultBranch.ValueBool(),
 		},
 	}
 
@@ -358,6 +413,34 @@ func (r *githubRunPolicyResource) Create(ctx context.Context, req resource.Creat
 			disallowedMap[label] = struct{}{}
 		}
 		createRequest.PolicyConfig.DisallowedRunnerLabels = disallowedMap
+	}
+
+	// Handle allowed runner labels set (allowed runs-on mode)
+	if !policyConfig.AllowedRunnerLabels.IsNull() {
+		var allowedLabels []string
+		diags = policyConfig.AllowedRunnerLabels.ElementsAs(ctx, &allowedLabels, false)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		// Convert to map[string]struct{} as expected by API
+		allowedMap := make(map[string]struct{})
+		for _, label := range allowedLabels {
+			allowedMap[label] = struct{}{}
+		}
+		createRequest.PolicyConfig.AllowedRunnerLabels = allowedMap
+	}
+
+	// Handle allowed runner constraints map (allowed runs-on mode)
+	if !policyConfig.AllowedRunnerConstraints.IsNull() {
+		allowedConstraints := make(map[string][]string)
+		diags = policyConfig.AllowedRunnerConstraints.ElementsAs(ctx, &allowedConstraints, false)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		createRequest.PolicyConfig.AllowedRunnerConstraints = allowedConstraints
 	}
 
 	// Handle pinned actions exemptions set
@@ -514,12 +597,17 @@ func (r *githubRunPolicyResource) Update(ctx context.Context, req resource.Updat
 			EnableActionPolicy:             policyConfig.EnableActionPolicy.ValueBool(),
 			EnableHardenRunnerPolicy:       enableHardenRunnerPolicy.ValueBool(),
 			EnableRunsOnPolicy:             policyConfig.EnableRunsOnPolicy.ValueBool(),
+			EnableStandardRunnerLabels:     policyConfig.EnableStandardRunnerLabels.ValueBool(),
 			EnableSecretsPolicy:            policyConfig.EnableSecretsPolicy.ValueBool(),
 			EnableCompromisedActionsPolicy: policyConfig.EnableCompromisedActionsPolicy.ValueBool(),
 			RequirePinnedActions:           policyConfig.RequirePinnedActions.ValueBool(),
 			IsDryRun:                       policyConfig.IsDryRun.ValueBool(),
 			BulkSecretsOnlyMode:            policyConfig.BulkSecretsOnlyMode.ValueBool(),
 			PrCommentTemplate:              policyConfig.PrCommentTemplate.ValueString(),
+			RunsOnMode:                     policyConfig.RunsOnMode.ValueString(),
+			RequirePolicyStore:             policyConfig.RequirePolicyStore.ValueBool(),
+			BlockJobContainer:              policyConfig.BlockJobContainer.ValueBool(),
+			SecretsAnalyzeDefaultBranch:    policyConfig.SecretsAnalyzeDefaultBranch.ValueBool(),
 		},
 	}
 
@@ -580,6 +668,34 @@ func (r *githubRunPolicyResource) Update(ctx context.Context, req resource.Updat
 			disallowedMap[label] = struct{}{}
 		}
 		updateRequest.PolicyConfig.DisallowedRunnerLabels = disallowedMap
+	}
+
+	// Handle allowed runner labels set (allowed runs-on mode)
+	if !policyConfig.AllowedRunnerLabels.IsNull() {
+		var allowedLabels []string
+		diags = policyConfig.AllowedRunnerLabels.ElementsAs(ctx, &allowedLabels, false)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		// Convert to map[string]struct{} as expected by API
+		allowedMap := make(map[string]struct{})
+		for _, label := range allowedLabels {
+			allowedMap[label] = struct{}{}
+		}
+		updateRequest.PolicyConfig.AllowedRunnerLabels = allowedMap
+	}
+
+	// Handle allowed runner constraints map (allowed runs-on mode)
+	if !policyConfig.AllowedRunnerConstraints.IsNull() {
+		allowedConstraints := make(map[string][]string)
+		diags = policyConfig.AllowedRunnerConstraints.ElementsAs(ctx, &allowedConstraints, false)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		updateRequest.PolicyConfig.AllowedRunnerConstraints = allowedConstraints
 	}
 
 	// Handle pinned actions exemptions set
@@ -750,12 +866,17 @@ func (r *githubRunPolicyResource) updateModelFromAPI(ctx context.Context, model 
 		"enable_action_policy":              types.BoolValue(policy.PolicyConfig.EnableActionPolicy),
 		"enable_harden_runner_policy":       types.BoolValue(policy.PolicyConfig.EnableHardenRunnerPolicy),
 		"enable_runs_on_policy":             types.BoolValue(policy.PolicyConfig.EnableRunsOnPolicy),
+		"enable_standard_runner_labels":     types.BoolValue(policy.PolicyConfig.EnableStandardRunnerLabels),
 		"enable_secrets_policy":             types.BoolValue(policy.PolicyConfig.EnableSecretsPolicy),
 		"enable_compromised_actions_policy": types.BoolValue(policy.PolicyConfig.EnableCompromisedActionsPolicy),
 		"require_pinned_actions":            types.BoolValue(policy.PolicyConfig.RequirePinnedActions),
 		"is_dry_run":                        types.BoolValue(policy.PolicyConfig.IsDryRun),
 		"bulk_secrets_only_mode":            types.BoolValue(policy.PolicyConfig.BulkSecretsOnlyMode),
 		"pr_comment_template":               types.StringValue(policy.PolicyConfig.PrCommentTemplate),
+		"runs_on_mode":                      types.StringValue(policy.PolicyConfig.RunsOnMode),
+		"require_policy_store":              types.BoolValue(policy.PolicyConfig.RequirePolicyStore),
+		"block_job_container":               types.BoolValue(policy.PolicyConfig.BlockJobContainer),
+		"secrets_analyze_default_branch":    types.BoolValue(policy.PolicyConfig.SecretsAnalyzeDefaultBranch),
 	}
 
 	// Handle allowed actions map
@@ -820,6 +941,40 @@ func (r *githubRunPolicyResource) updateModelFromAPI(ctx context.Context, model 
 		policyConfigAttrs["disallowed_runner_labels"] = types.SetNull(types.StringType)
 	}
 
+	// Handle allowed runner labels set (allowed runs-on mode)
+	if policy.PolicyConfig.AllowedRunnerLabels != nil {
+		allowedLabelsList := make([]attr.Value, 0, len(policy.PolicyConfig.AllowedRunnerLabels))
+		for label := range policy.PolicyConfig.AllowedRunnerLabels {
+			allowedLabelsList = append(allowedLabelsList, types.StringValue(label))
+		}
+		setValue, setDiags := types.SetValue(types.StringType, allowedLabelsList)
+		diags.Append(setDiags...)
+		policyConfigAttrs["allowed_runner_labels"] = setValue
+	} else {
+		policyConfigAttrs["allowed_runner_labels"] = types.SetNull(types.StringType)
+	}
+
+	// Handle allowed runner constraints map (allowed runs-on mode). Values are
+	// modeled as a set per key so the server-side sort/dedup does not surface as
+	// plan drift.
+	if policy.PolicyConfig.AllowedRunnerConstraints != nil {
+		constraintsMap := make(map[string]attr.Value, len(policy.PolicyConfig.AllowedRunnerConstraints))
+		for key, values := range policy.PolicyConfig.AllowedRunnerConstraints {
+			valueList := make([]attr.Value, len(values))
+			for i, v := range values {
+				valueList[i] = types.StringValue(v)
+			}
+			setValue, setDiags := types.SetValue(types.StringType, valueList)
+			diags.Append(setDiags...)
+			constraintsMap[key] = setValue
+		}
+		mapValue, mapDiags := types.MapValue(types.SetType{ElemType: types.StringType}, constraintsMap)
+		diags.Append(mapDiags...)
+		policyConfigAttrs["allowed_runner_constraints"] = mapValue
+	} else {
+		policyConfigAttrs["allowed_runner_constraints"] = types.MapNull(types.SetType{ElemType: types.StringType})
+	}
+
 	// Handle pinned actions exemptions set
 	if policy.PolicyConfig.PinnedActionsExemptions != nil {
 		pinnedExemptionsList := make([]attr.Value, len(policy.PolicyConfig.PinnedActionsExemptions))
@@ -856,6 +1011,7 @@ func (r *githubRunPolicyResource) updateModelFromAPI(ctx context.Context, model 
 		"harden_runner_target_labels":       types.SetType{ElemType: types.StringType},
 		"harden_runner_custom_actions":      types.SetType{ElemType: types.StringType},
 		"enable_runs_on_policy":             types.BoolType,
+		"enable_standard_runner_labels":     types.BoolType,
 		"disallowed_runner_labels":          types.SetType{ElemType: types.StringType},
 		"enable_secrets_policy":             types.BoolType,
 		"enable_compromised_actions_policy": types.BoolType,
@@ -865,6 +1021,12 @@ func (r *githubRunPolicyResource) updateModelFromAPI(ctx context.Context, model 
 		"bulk_secrets_only_mode":            types.BoolType,
 		"pr_comment_template":               types.StringType,
 		"exempted_users":                    types.SetType{ElemType: types.StringType},
+		"runs_on_mode":                      types.StringType,
+		"allowed_runner_labels":             types.SetType{ElemType: types.StringType},
+		"allowed_runner_constraints":        types.MapType{ElemType: types.SetType{ElemType: types.StringType}},
+		"require_policy_store":              types.BoolType,
+		"block_job_container":               types.BoolType,
+		"secrets_analyze_default_branch":    types.BoolType,
 	}
 
 	policyConfigObj, objDiags := types.ObjectValue(policyConfigAttrTypes, policyConfigAttrs)

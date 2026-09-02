@@ -247,3 +247,104 @@ func (m *MockStepSecurityClient) DeleteRegistryControls(ctx context.Context, reg
 	args := m.Called(ctx, registry)
 	return args.Error(0)
 }
+
+// Developer MDM Policy methods
+func (m *MockStepSecurityClient) CreateDeveloperMDMPolicy(ctx context.Context, req DeveloperMDMPolicyRequest) (*DeveloperMDMPolicy, error) {
+	args := m.Called(ctx, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMPolicy), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) ListDeveloperMDMPolicies(ctx context.Context) ([]DeveloperMDMPolicy, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]DeveloperMDMPolicy), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) GetDeveloperMDMPolicy(ctx context.Context, policyID string) (*DeveloperMDMPolicy, error) {
+	args := m.Called(ctx, policyID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMPolicy), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) UpdateDeveloperMDMPolicy(ctx context.Context, policyID string, req DeveloperMDMPolicyRequest) (*DeveloperMDMPolicy, error) {
+	args := m.Called(ctx, policyID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMPolicy), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) DeleteDeveloperMDMPolicy(ctx context.Context, policyID string) error {
+	args := m.Called(ctx, policyID)
+	return args.Error(0)
+}
+
+// Developer MDM Profile methods
+func (m *MockStepSecurityClient) CreateDeveloperMDMProfile(ctx context.Context, req DeveloperMDMProfileRequest) (*DeveloperMDMProfile, error) {
+	args := m.Called(ctx, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMProfile), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) ListDeveloperMDMProfiles(ctx context.Context) ([]DeveloperMDMProfile, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]DeveloperMDMProfile), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) GetDeveloperMDMProfile(ctx context.Context, profileID string) (*DeveloperMDMProfile, error) {
+	args := m.Called(ctx, profileID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMProfile), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) UpdateDeveloperMDMProfile(ctx context.Context, profileID string, req DeveloperMDMProfileRequest) (*DeveloperMDMProfile, error) {
+	args := m.Called(ctx, profileID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMProfile), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) DeleteDeveloperMDMProfile(ctx context.Context, profileID string) error {
+	args := m.Called(ctx, profileID)
+	return args.Error(0)
+}
+
+// Developer MDM Export and Compliance methods
+func (m *MockStepSecurityClient) ExportDeveloperMDMProfile(ctx context.Context, profileID, os, category, target, format string) (*DeveloperMDMExportArtifact, error) {
+	args := m.Called(ctx, profileID, os, category, target, format)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMExportArtifact), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) GetDeveloperMDMDeviceCompliance(ctx context.Context, deviceID string) (*DeveloperMDMDeviceComplianceResponse, error) {
+	args := m.Called(ctx, deviceID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMDeviceComplianceResponse), args.Error(1)
+}
+
+func (m *MockStepSecurityClient) GetDeveloperMDMProfileCompliance(ctx context.Context, profileID string) (*DeveloperMDMProfileComplianceResponse, error) {
+	args := m.Called(ctx, profileID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*DeveloperMDMProfileComplianceResponse), args.Error(1)
+}
