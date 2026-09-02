@@ -211,7 +211,7 @@ Optional:
 Optional:
 
 - `config` (String) YAML string configuring the harden runner.
-- `exempt_runner_labels` (List of String) List of runner label glob patterns (e.g. "gpu-*") to exclude from harden runner. Jobs whose runs-on matches any pattern are skipped, regardless of target_runner_labels.
+- `exempt_runner_labels` (Set of String) Set of runner label glob patterns (e.g. "gpu-*") to exclude from harden runner. Jobs whose runs-on matches any pattern are skipped, regardless of target_runner_labels. Order is not significant.
 - `target_runner_labels` (List of String) List of runner labels to apply the harden runner config to. When non-empty, skip_harden_runner is automatically set to true internally.
 - `update_existing_configuration` (Boolean) When enabled, removes existing harden runner configurations not in the config.
 

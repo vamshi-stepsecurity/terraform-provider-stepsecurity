@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
@@ -264,14 +265,14 @@ func (r *policyDrivenPRResource) Schema(_ context.Context, _ resource.SchemaRequ
 								),
 								Description: "List of runner labels to apply the harden runner config to. When non-empty, skip_harden_runner is automatically set to true internally.",
 							},
-							"exempt_runner_labels": schema.ListAttribute{
+							"exempt_runner_labels": schema.SetAttribute{
 								ElementType: types.StringType,
 								Optional:    true,
 								Computed:    true,
-								Default: listdefault.StaticValue(
-									types.ListValueMust(types.StringType, []attr.Value{}),
+								Default: setdefault.StaticValue(
+									types.SetValueMust(types.StringType, []attr.Value{}),
 								),
-								Description: "List of runner label glob patterns (e.g. \"gpu-*\") to exclude from harden runner. Jobs whose runs-on matches any pattern are skipped, regardless of target_runner_labels.",
+								Description: "Set of runner label glob patterns (e.g. \"gpu-*\") to exclude from harden runner. Jobs whose runs-on matches any pattern are skipped, regardless of target_runner_labels. Order is not significant.",
 							},
 						},
 					},
@@ -524,7 +525,7 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 				"config":                        types.StringType,
 				"update_existing_configuration": types.BoolType,
 				"target_runner_labels":          types.ListType{ElemType: types.StringType},
-				"exempt_runner_labels":          types.ListType{ElemType: types.StringType},
+				"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 			}},
 		},
 		map[string]attr.Value{
@@ -570,19 +571,19 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 					for i, l := range exemptLabels {
 						exemptLabelElems[i] = types.StringValue(l)
 					}
-					exemptLabelsList, _ := types.ListValue(types.StringType, exemptLabelElems)
+					exemptLabelsSet, _ := types.SetValue(types.StringType, exemptLabelElems)
 					obj, _ := types.ObjectValue(
 						map[string]attr.Type{
 							"config":                        types.StringType,
 							"update_existing_configuration": types.BoolType,
 							"target_runner_labels":          types.ListType{ElemType: types.StringType},
-							"exempt_runner_labels":          types.ListType{ElemType: types.StringType},
+							"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 						},
 						map[string]attr.Value{
 							"config":                        stringOrNull(policy.AutoRemdiationOptions.HardenRunnerConfig.Config),
 							"update_existing_configuration": types.BoolValue(policy.AutoRemdiationOptions.HardenRunnerConfig.Subtractive),
 							"target_runner_labels":          labelsList,
-							"exempt_runner_labels":          exemptLabelsList,
+							"exempt_runner_labels":          exemptLabelsSet,
 						},
 					)
 					return obj
@@ -591,7 +592,7 @@ func (r *policyDrivenPRResource) ImportState(ctx context.Context, req resource.I
 					"config":                        types.StringType,
 					"update_existing_configuration": types.BoolType,
 					"target_runner_labels":          types.ListType{ElemType: types.StringType},
-					"exempt_runner_labels":          types.ListType{ElemType: types.StringType},
+					"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 				})
 			}(),
 		},
@@ -650,7 +651,7 @@ type hardenRunnerConfigModel struct {
 	Config                      types.String `tfsdk:"config"`
 	UpdateExistingConfiguration types.Bool   `tfsdk:"update_existing_configuration"`
 	RunnerLabels                types.List   `tfsdk:"target_runner_labels"`
-	ExemptRunnerLabels          types.List   `tfsdk:"exempt_runner_labels"`
+	ExemptRunnerLabels          types.Set    `tfsdk:"exempt_runner_labels"`
 }
 
 type ActionsToReplaceModel struct {
@@ -1928,7 +1929,7 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 				"config":                        types.StringType,
 				"update_existing_configuration": types.BoolType,
 				"target_runner_labels":          types.ListType{ElemType: types.StringType},
-				"exempt_runner_labels":          types.ListType{ElemType: types.StringType},
+				"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 			}},
 		},
 		map[string]attr.Value{
@@ -1974,19 +1975,19 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 					for i, l := range exemptLabels {
 						exemptLabelElems[i] = types.StringValue(l)
 					}
-					exemptLabelsList, _ := types.ListValue(types.StringType, exemptLabelElems)
+					exemptLabelsSet, _ := types.SetValue(types.StringType, exemptLabelElems)
 					obj, _ := types.ObjectValue(
 						map[string]attr.Type{
 							"config":                        types.StringType,
 							"update_existing_configuration": types.BoolType,
 							"target_runner_labels":          types.ListType{ElemType: types.StringType},
-							"exempt_runner_labels":          types.ListType{ElemType: types.StringType},
+							"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 						},
 						map[string]attr.Value{
 							"config":                        stringOrNull(stepSecurityPolicy.AutoRemdiationOptions.HardenRunnerConfig.Config),
 							"update_existing_configuration": types.BoolValue(stepSecurityPolicy.AutoRemdiationOptions.HardenRunnerConfig.Subtractive),
 							"target_runner_labels":          labelsList,
-							"exempt_runner_labels":          exemptLabelsList,
+							"exempt_runner_labels":          exemptLabelsSet,
 						},
 					)
 					return obj
@@ -1995,7 +1996,7 @@ func (r *policyDrivenPRResource) updatePolicyDrivenPRState(ctx context.Context, 
 					"config":                        types.StringType,
 					"update_existing_configuration": types.BoolType,
 					"target_runner_labels":          types.ListType{ElemType: types.StringType},
-					"exempt_runner_labels":          types.ListType{ElemType: types.StringType},
+					"exempt_runner_labels":          types.SetType{ElemType: types.StringType},
 				})
 			}(),
 		},
