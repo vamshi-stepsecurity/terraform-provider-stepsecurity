@@ -20,6 +20,11 @@ func hardenRunnerConfigObjectType() types.ObjectType {
 		"config":                        types.StringType,
 		"update_existing_configuration": types.BoolType,
 		"target_runner_labels":          types.ListType{ElemType: types.StringType},
+		// A set, not a list: exempt patterns are an unordered exclusion set, so the
+		// schema uses SetAttribute to keep ordering insignificant during plans. This
+		// must stay in sync with hardenRunnerConfigModel, otherwise decoding
+		// harden_runner_config fails and order preservation silently bails out.
+		"exempt_runner_labels": types.SetType{ElemType: types.StringType},
 	}}
 }
 
@@ -30,6 +35,13 @@ func testStringList(t *testing.T, values ...string) types.List {
 	return list
 }
 
+func testStringSet(t *testing.T, values ...string) types.Set {
+	t.Helper()
+	set, diags := types.SetValueFrom(context.Background(), types.StringType, values)
+	require.False(t, diags.HasError(), "building set: %v", diags)
+	return set
+}
+
 func testHardenRunnerConfig(t *testing.T, labels ...string) types.Object {
 	t.Helper()
 	obj, diags := types.ObjectValue(
@@ -38,6 +50,7 @@ func testHardenRunnerConfig(t *testing.T, labels ...string) types.Object {
 			"config":                        types.StringValue("egress-policy: audit"),
 			"update_existing_configuration": types.BoolValue(false),
 			"target_runner_labels":          testStringList(t, labels...),
+			"exempt_runner_labels":          testStringSet(t),
 		},
 	)
 	require.False(t, diags.HasError(), "building harden_runner_config: %v", diags)
