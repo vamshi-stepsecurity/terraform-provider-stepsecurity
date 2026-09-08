@@ -62,6 +62,16 @@ resource "stepsecurity_policy_driven_pr" "repo_level_config" {
 
     # v2-only features (requires policy-driven PR v2 to be enabled)
     update_precommit_file = ["eslint"]
+    # Alternatively, provide a full .pre-commit-config.yaml instead of selecting
+    # hooks. custom_precommit_config and update_precommit_file are mutually
+    # exclusive, so uncomment this only after removing update_precommit_file above.
+    # The content is written as-is, no hook merging is done. When
+    # update_existing_configuration is false the config is only added to repos that
+    # do not already have one; when true, an existing config is overwritten.
+    # custom_precommit_config = {
+    #   config                        = "repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v4.6.0\n    hooks:\n      - id: trailing-whitespace\n      - id: end-of-file-fixer\n"
+    #   update_existing_configuration = false
+    # }
     package_ecosystem = [
       {
         package       = "npm"
