@@ -42,6 +42,7 @@ type AutoRemdiationOptions struct {
 	UpdatePrecommitFile                     []string               `json:"update_precommit_file,omitempty"`
 	CustomPrecommitConfig                   *CustomPrecommitConfig `json:"custom_precommit_config,omitempty"`
 	PackageEcosystem                        []DependabotConfig     `json:"package_ecosystem,omitempty"`
+	DockerfilePatterns                      []string               `json:"dockerfile_patterns,omitempty"`
 	Subtractive                             *bool                  `json:"subtractive,omitempty"`
 	AddWorkflows                            string                 `json:"add_workflows,omitempty"`
 	ActionCommitMap                         map[string]string      `json:"action_commit_map"`
@@ -77,6 +78,7 @@ type controlSettings struct {
 	UpdatePrecommitFile                 map[string]bool                      `json:"update_precommit_file"`
 	CustomPrecommitConfig               *CustomPrecommitConfig               `json:"custom_precommit_config,omitempty"`
 	PackageEcosystem                    []DependabotConfig                   `json:"package_ecosystem,omitempty"`
+	DockerfilePatterns                  []string                             `json:"dockerfile_patterns,omitempty"`
 	Subtractive                         *bool                                `json:"subtractive,omitempty"`
 	AddWorkflows                        string                               `json:"add_workflows,omitempty"`
 	ApplyIssuePRConfigForAllRepos       *bool                                `json:"apply_issue_pr_config_for_all_repos,omitempty"`
@@ -107,21 +109,6 @@ type HardenRunnerConfig struct {
 	SkipHardenRunner   bool     `json:"skipHardenRunner"`
 	RunnerLabels       []string `json:"runnerLabels"`
 	ExemptRunnerLabels []string `json:"exemptRunnerLabels"`
-}
-
-// CustomPrecommitConfig is a full .pre-commit-config.yaml provided verbatim.
-// UpdateExistingConfiguration gates overwriting an existing file: false leaves an
-// existing config untouched (only creates when absent); true overwrites it.
-//
-// Neither field carries omitempty. The API stores this object wholesale, so both an
-// empty config and update_existing_configuration=false have to travel as explicit
-// values: with omitempty, turning the flag back off would drop the key and leave the
-// request unable to say "false" at all. Whether the object itself is present is carried
-// by the enclosing pointer, which is where omitempty belongs, since a nil pointer is the
-// only way to express "no custom config configured".
-type CustomPrecommitConfig struct {
-	Config                      string `json:"config"`
-	UpdateExistingConfiguration bool   `json:"update_existing_configuration"`
 }
 
 // CustomPrecommitConfig is a full .pre-commit-config.yaml provided verbatim.
@@ -290,6 +277,7 @@ func (c *APIClient) CreatePolicyDrivenPRPolicy(ctx context.Context, createReques
 		UpdatePrecommitFile:                 updatePrecommitFileMap,
 		CustomPrecommitConfig:               createRequest.AutoRemdiationOptions.CustomPrecommitConfig,
 		PackageEcosystem:                    createRequest.AutoRemdiationOptions.PackageEcosystem,
+		DockerfilePatterns:                  createRequest.AutoRemdiationOptions.DockerfilePatterns,
 		Subtractive:                         createRequest.AutoRemdiationOptions.Subtractive,
 		AddWorkflows:                        createRequest.AutoRemdiationOptions.AddWorkflows,
 		ActionCommitMap:                     createRequest.AutoRemdiationOptions.ActionCommitMap,
@@ -502,6 +490,7 @@ func (c *APIClient) GetPolicyDrivenPRPolicy(ctx context.Context, owner string, r
 		UpdatePrecommitFile:                     updatePrecommitFiles,
 		CustomPrecommitConfig:                   selectedConfig.ControlSettings.CustomPrecommitConfig,
 		PackageEcosystem:                        selectedConfig.ControlSettings.PackageEcosystem,
+		DockerfilePatterns:                      selectedConfig.ControlSettings.DockerfilePatterns,
 		Subtractive:                             selectedConfig.ControlSettings.Subtractive,
 		AddWorkflows:                            selectedConfig.ControlSettings.AddWorkflows,
 		HardenRunnerConfig:                      selectedConfig.ControlSettings.HardenRunnerConfig,
@@ -724,6 +713,7 @@ func (c *APIClient) DiscoverPolicyDrivenPRConfig(ctx context.Context, owner stri
 		UpdatePrecommitFile:                     updatePrecommitFiles,
 		CustomPrecommitConfig:                   selectedConfig.ControlSettings.CustomPrecommitConfig,
 		PackageEcosystem:                        selectedConfig.ControlSettings.PackageEcosystem,
+		DockerfilePatterns:                      selectedConfig.ControlSettings.DockerfilePatterns,
 		Subtractive:                             selectedConfig.ControlSettings.Subtractive,
 		AddWorkflows:                            selectedConfig.ControlSettings.AddWorkflows,
 		HardenRunnerConfig:                      selectedConfig.ControlSettings.HardenRunnerConfig,
