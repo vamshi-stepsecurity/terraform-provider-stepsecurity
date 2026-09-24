@@ -6,11 +6,20 @@ import (
 	"fmt"
 )
 
+// GitHubPRTemplate is sent as a whole object: the API replaces the stored template
+// rather than merging the fields it was given.
+//
+// BranchName is the template for the remediation PR branch name. It must contain the
+// "{time}" placeholder, which the API replaces with a DDHHMM timestamp so each
+// remediation gets a unique branch. Empty means the default branch name is used, and it
+// is serialized without omitempty so that clearing the template sends an explicit empty
+// string instead of dropping the key, matching the other scalar fields here.
 type GitHubPRTemplate struct {
 	Title         string   `json:"title"`
 	Summary       string   `json:"summary"`
 	CommitMessage string   `json:"commit_message"`
 	Labels        []string `json:"labels,omitempty"`
+	BranchName    string   `json:"branch_name"`
 }
 
 func (c *APIClient) GetGitHubPRTemplate(ctx context.Context, owner string) (*GitHubPRTemplate, error) {

@@ -48,6 +48,11 @@ resource "stepsecurity_github_pr_template" "example" {
     Signed-off-by: StepSecurity Bot <bot@stepsecurity.io>
   EOT
   labels         = ["security", "automated"]
+
+  # Optional. Template for the remediation PR branch name. Must contain {time},
+  # which is replaced with a DDHHMM timestamp so each PR gets a unique branch.
+  # Omit to use the default branch name.
+  branch_name = "chore-GHA-{time}-stepsecurity-remediation"
 }
 
 # For importing existing PR template config to terraform state
@@ -71,6 +76,7 @@ import {
 
 ### Optional
 
+- `branch_name` (String) Template for the remediation PR branch name, for example "chore-GHA-{time}-stepsecurity-remediation". Must contain the {time} placeholder, which is replaced with a DDHHMM timestamp so each PR gets a unique branch. Omit to use the default branch name. Applies to the policy-driven PR flow only.
 - `labels` (List of String) List of labels to apply to policy-driven PRs.
 
 ### Read-Only

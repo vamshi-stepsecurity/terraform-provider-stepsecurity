@@ -97,11 +97,31 @@ type DependabotConfig struct {
 	GroupsYAML   string `json:"groups_yaml,omitempty"`
 }
 
+// HardenRunnerConfig is sent as a whole object: the API replaces it rather than merging
+// it field by field. Both label fields are serialized unconditionally, without omitempty,
+// so clearing either one reaches the API as an explicit empty list instead of a missing
+// key, and does not depend on that replace-vs-merge behavior staying as it is.
 type HardenRunnerConfig struct {
-	Config           string   `json:"config"`
-	Subtractive      bool     `json:"subtractive"`
-	SkipHardenRunner bool     `json:"skipHardenRunner"`
-	RunnerLabels     []string `json:"runnerLabels"`
+	Config             string   `json:"config"`
+	Subtractive        bool     `json:"subtractive"`
+	SkipHardenRunner   bool     `json:"skipHardenRunner"`
+	RunnerLabels       []string `json:"runnerLabels"`
+	ExemptRunnerLabels []string `json:"exemptRunnerLabels"`
+}
+
+// CustomPrecommitConfig is a full .pre-commit-config.yaml provided verbatim.
+// UpdateExistingConfiguration gates overwriting an existing file: false leaves an
+// existing config untouched (only creates when absent); true overwrites it.
+//
+// Neither field carries omitempty. The API stores this object wholesale, so both an
+// empty config and update_existing_configuration=false have to travel as explicit
+// values: with omitempty, turning the flag back off would drop the key and leave the
+// request unable to say "false" at all. Whether the object itself is present is carried
+// by the enclosing pointer, which is where omitempty belongs, since a nil pointer is the
+// only way to express "no custom config configured".
+type CustomPrecommitConfig struct {
+	Config                      string `json:"config"`
+	UpdateExistingConfiguration bool   `json:"update_existing_configuration"`
 }
 
 // CustomPrecommitConfig is a full .pre-commit-config.yaml provided verbatim.
@@ -170,6 +190,17 @@ func (c *APIClient) CreatePolicyDrivenPRPolicy(ctx context.Context, createReques
 	if len(createRequest.AutoRemdiationOptions.ExemptedFromReplacement) > 0 {
 		t := true
 		replaceAllActions = &t
+	}
+
+	// actions_to_replace and replace_all_actions are mutually exclusive on the API side,
+	// and the check there is for presence rather than content: a non-nil empty map still
+	// counts as sending the field. actions_to_replace is serialized without omitempty so
+	// that an empty map clears the stored value, which means an empty map built for a
+	// replace-all request would reach the API and be rejected. Drop it, since it carries
+	// no information. A non-empty map is left alone so a genuine conflict is still
+	// reported by the API instead of silently discarding the configured actions.
+	if replaceAllActions != nil && len(actionsToReplace) == 0 {
+		actionsToReplace = nil
 	}
 
 	// Build control checks config

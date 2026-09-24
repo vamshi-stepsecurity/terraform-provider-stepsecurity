@@ -103,7 +103,7 @@ func TestGitHubPRTemplateResource_Schema(t *testing.T) {
 	}
 
 	// Test required attributes
-	expectedAttrs := []string{"id", "owner", "title", "summary", "commit_message", "labels"}
+	expectedAttrs := []string{"id", "owner", "title", "summary", "commit_message", "labels", "branch_name"}
 	for _, attr := range expectedAttrs {
 		if _, exists := resp.Schema.Attributes[attr]; !exists {
 			t.Errorf("Expected attribute %s not found in schema", attr)
@@ -149,6 +149,16 @@ func TestGitHubPRTemplateResource_Schema(t *testing.T) {
 	if idAttr, exists := resp.Schema.Attributes["id"]; exists {
 		if !idAttr.IsComputed() {
 			t.Error("Expected id attribute to be computed")
+		}
+	}
+
+	// Test that branch_name is optional
+	if branchNameAttr, exists := resp.Schema.Attributes["branch_name"]; exists {
+		if !branchNameAttr.IsOptional() {
+			t.Error("Expected branch_name attribute to be optional")
+		}
+		if branchNameAttr.IsRequired() {
+			t.Error("Expected branch_name attribute not to be required")
 		}
 	}
 }

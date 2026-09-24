@@ -3,14 +3,17 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	stepsecurityapi "github.com/step-security/terraform-provider-stepsecurity/internal/stepsecurity-api"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -94,6 +97,16 @@ func (r *githubPRTemplateResource) Schema(_ context.Context, _ resource.SchemaRe
 				Optional:    true,
 				Description: "List of labels to apply to policy-driven PRs.",
 			},
+			"branch_name": schema.StringAttribute{
+				Optional: true,
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(
+						regexp.MustCompile(`\{time\}`),
+						"must contain the {time} placeholder, which is replaced with a DDHHMM timestamp so each remediation PR gets a unique branch",
+					),
+				},
+				Description: "Template for the remediation PR branch name, for example \"chore-GHA-{time}-stepsecurity-remediation\". Must contain the {time} placeholder, which is replaced with a DDHHMM timestamp so each PR gets a unique branch. Omit to use the default branch name. Applies to the policy-driven PR flow only.",
+			},
 		},
 	}
 }
@@ -128,6 +141,7 @@ type githubPRTemplateModel struct {
 	Summary       types.String `tfsdk:"summary"`
 	CommitMessage types.String `tfsdk:"commit_message"`
 	Labels        types.List   `tfsdk:"labels"`
+	BranchName    types.String `tfsdk:"branch_name"`
 }
 
 // Create creates the resource and sets the initial Terraform state.
@@ -155,6 +169,7 @@ func (r *githubPRTemplateResource) Create(ctx context.Context, req resource.Crea
 		Summary:       plan.Summary.ValueString(),
 		CommitMessage: plan.CommitMessage.ValueString(),
 		Labels:        labels,
+		BranchName:    plan.BranchName.ValueString(),
 	}
 
 	err := r.client.UpdateGitHubPRTemplate(ctx, plan.Owner.ValueString(), template)
@@ -201,6 +216,15 @@ func (r *githubPRTemplateResource) Read(ctx context.Context, req resource.ReadRe
 	state.Title = types.StringValue(template.Title)
 	state.Summary = types.StringValue(template.Summary)
 	state.CommitMessage = types.StringValue(template.CommitMessage)
+
+	// branch_name is optional and omitted by the API when unset. Map an absent
+	// value to null rather than "", otherwise a config that omits branch_name
+	// would show a permanent diff.
+	if template.BranchName != "" {
+		state.BranchName = types.StringValue(template.BranchName)
+	} else {
+		state.BranchName = types.StringNull()
+	}
 
 	// Convert labels to Terraform list
 	if len(template.Labels) > 0 {
@@ -251,6 +275,7 @@ func (r *githubPRTemplateResource) Update(ctx context.Context, req resource.Upda
 		Summary:       plan.Summary.ValueString(),
 		CommitMessage: plan.CommitMessage.ValueString(),
 		Labels:        labels,
+		BranchName:    plan.BranchName.ValueString(),
 	}
 
 	err := r.client.UpdateGitHubPRTemplate(ctx, plan.Owner.ValueString(), template)
