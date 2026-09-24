@@ -42,6 +42,7 @@ type AutoRemdiationOptions struct {
 	UpdatePrecommitFile                     []string               `json:"update_precommit_file,omitempty"`
 	CustomPrecommitConfig                   *CustomPrecommitConfig `json:"custom_precommit_config,omitempty"`
 	PackageEcosystem                        []DependabotConfig     `json:"package_ecosystem,omitempty"`
+	DockerfilePatterns                      []string               `json:"dockerfile_patterns,omitempty"`
 	Subtractive                             *bool                  `json:"subtractive,omitempty"`
 	AddWorkflows                            string                 `json:"add_workflows,omitempty"`
 	ActionCommitMap                         map[string]string      `json:"action_commit_map"`
@@ -77,6 +78,7 @@ type controlSettings struct {
 	UpdatePrecommitFile                 map[string]bool                      `json:"update_precommit_file"`
 	CustomPrecommitConfig               *CustomPrecommitConfig               `json:"custom_precommit_config,omitempty"`
 	PackageEcosystem                    []DependabotConfig                   `json:"package_ecosystem,omitempty"`
+	DockerfilePatterns                  []string                             `json:"dockerfile_patterns,omitempty"`
 	Subtractive                         *bool                                `json:"subtractive,omitempty"`
 	AddWorkflows                        string                               `json:"add_workflows,omitempty"`
 	ApplyIssuePRConfigForAllRepos       *bool                                `json:"apply_issue_pr_config_for_all_repos,omitempty"`
@@ -275,6 +277,7 @@ func (c *APIClient) CreatePolicyDrivenPRPolicy(ctx context.Context, createReques
 		UpdatePrecommitFile:                 updatePrecommitFileMap,
 		CustomPrecommitConfig:               createRequest.AutoRemdiationOptions.CustomPrecommitConfig,
 		PackageEcosystem:                    createRequest.AutoRemdiationOptions.PackageEcosystem,
+		DockerfilePatterns:                  createRequest.AutoRemdiationOptions.DockerfilePatterns,
 		Subtractive:                         createRequest.AutoRemdiationOptions.Subtractive,
 		AddWorkflows:                        createRequest.AutoRemdiationOptions.AddWorkflows,
 		ActionCommitMap:                     createRequest.AutoRemdiationOptions.ActionCommitMap,
@@ -487,6 +490,7 @@ func (c *APIClient) GetPolicyDrivenPRPolicy(ctx context.Context, owner string, r
 		UpdatePrecommitFile:                     updatePrecommitFiles,
 		CustomPrecommitConfig:                   selectedConfig.ControlSettings.CustomPrecommitConfig,
 		PackageEcosystem:                        selectedConfig.ControlSettings.PackageEcosystem,
+		DockerfilePatterns:                      selectedConfig.ControlSettings.DockerfilePatterns,
 		Subtractive:                             selectedConfig.ControlSettings.Subtractive,
 		AddWorkflows:                            selectedConfig.ControlSettings.AddWorkflows,
 		HardenRunnerConfig:                      selectedConfig.ControlSettings.HardenRunnerConfig,
@@ -709,6 +713,7 @@ func (c *APIClient) DiscoverPolicyDrivenPRConfig(ctx context.Context, owner stri
 		UpdatePrecommitFile:                     updatePrecommitFiles,
 		CustomPrecommitConfig:                   selectedConfig.ControlSettings.CustomPrecommitConfig,
 		PackageEcosystem:                        selectedConfig.ControlSettings.PackageEcosystem,
+		DockerfilePatterns:                      selectedConfig.ControlSettings.DockerfilePatterns,
 		Subtractive:                             selectedConfig.ControlSettings.Subtractive,
 		AddWorkflows:                            selectedConfig.ControlSettings.AddWorkflows,
 		HardenRunnerConfig:                      selectedConfig.ControlSettings.HardenRunnerConfig,
