@@ -127,9 +127,9 @@ func (r *userResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 						},
 						"role": schema.StringAttribute{
 							Required:    true,
-							Description: "The role of the user",
+							Description: "The role of the user. Either a built-in role (`admin` or `auditor`) or the name of a custom role defined with the `stepsecurity_role` resource.",
 							Validators: []validator.String{
-								stringvalidator.OneOf("admin", "auditor"),
+								stringvalidator.LengthAtLeast(1),
 							},
 						},
 						"scope": schema.StringAttribute{

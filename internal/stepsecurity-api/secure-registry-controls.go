@@ -15,6 +15,7 @@ type SecureRegistryControls struct {
 	Typosquatting       *TyposquattingControl       `json:"typosquatting,omitempty"`
 	CustomBlockList     *CustomBlockListControl     `json:"custom_block_list,omitempty"`
 	NpmSettings         *NpmSettingsControl         `json:"npm_settings,omitempty"`
+	GoSettings          *GoSettingsControl          `json:"go_settings,omitempty"`
 	UpdatedBy           string                      `json:"updated_by"`
 	UpdatedAt           string                      `json:"updated_at"`
 }
@@ -46,14 +47,31 @@ type TyposquattingControl struct {
 type CustomBlockListControl struct {
 	Enabled  bool     `json:"enabled"`
 	Patterns []string `json:"patterns,omitempty"`
+	// BlockPseudoVersions lists module globs whose versions must be released tags.
+	// Go only; the backend rejects it for other registries.
+	BlockPseudoVersions []string `json:"block_pseudo_versions,omitempty"`
+	// BlockYankedVersions hard-blocks crate versions yanked on crates.io.
+	// Cargo only; the backend rejects it for other registries.
+	BlockYankedVersions bool `json:"block_yanked_versions,omitempty"`
 }
 
 // NpmSettingsControl holds npm-specific non-security registry settings. Unlike the
 // other controls it has no "enabled" toggle — RewriteTarballURLs is itself the
 // setting. Only applicable when Registry == "npm"; the backend rejects any non-nil
 // value for other registries.
+//
+// The two message templates are pointers because the backend treats them as
+// preserve-on-omit: nil keeps the stored value, an empty string clears it.
 type NpmSettingsControl struct {
-	RewriteTarballURLs bool `json:"rewrite_tarball_urls"`
+	RewriteTarballURLs           bool    `json:"rewrite_tarball_urls"`
+	BlockMessageTemplate         *string `json:"block_message_template,omitempty"`
+	HiddenVersionsNoticeTemplate *string `json:"hidden_versions_notice_template,omitempty"`
+}
+
+// GoSettingsControl holds Go-specific non-security registry settings. Only
+// applicable when Registry == "go".
+type GoSettingsControl struct {
+	ProxyChecksumDB bool `json:"proxy_checksum_db"`
 }
 
 // UpsertSecureRegistryControlsRequest is the PUT request body. Omitting a control
@@ -64,6 +82,7 @@ type UpsertSecureRegistryControlsRequest struct {
 	Typosquatting       *TyposquattingControl       `json:"typosquatting,omitempty"`
 	CustomBlockList     *CustomBlockListControl     `json:"custom_block_list,omitempty"`
 	NpmSettings         *NpmSettingsControl         `json:"npm_settings,omitempty"`
+	GoSettings          *GoSettingsControl          `json:"go_settings,omitempty"`
 }
 
 func (c *APIClient) GetRegistryControls(ctx context.Context, registry string) (*SecureRegistryControls, error) {

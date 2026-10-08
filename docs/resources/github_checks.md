@@ -225,5 +225,5 @@ Import is supported using the following syntax:
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-terraform import 'stepsecurity_github_checks.github_checks' ORG_NAME/OWNER_NAME
+terraform import 'stepsecurity_github_checks.github_checks' OWNER_NAME
 ```

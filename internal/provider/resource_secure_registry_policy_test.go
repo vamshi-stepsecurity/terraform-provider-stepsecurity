@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
@@ -595,6 +596,7 @@ func TestSecureRegistryPolicyResource_ValidateConfig_NpmSettings(t *testing.T) {
 				TyposquattingControl:       tc.typosquattingControl,
 				CustomBlockListControl:     tc.customBlockListControl,
 				NpmSettings:                tc.npmSettings,
+				GoSettings:                 types.ObjectNull(goSettingsAttrTypes),
 			}
 
 			config := testSecureRegistryPolicyConfig(t, model)
@@ -661,6 +663,7 @@ func TestSecureRegistryPolicyResource_ValidateConfig_UnknownBlocksDeferValidatio
 				TyposquattingControl:       types.ObjectNull(typosquattingControlAttrTypes),
 				CustomBlockListControl:     types.ObjectNull(customBlockListControlAttrTypes),
 				NpmSettings:                types.ObjectNull(npmSettingsAttrTypes),
+				GoSettings:                 types.ObjectNull(goSettingsAttrTypes),
 			}
 			tc.model(&model)
 
@@ -1115,14 +1118,26 @@ func buildTestCustomBlockListObject(ctx context.Context, enabled bool, patterns 
 		patternsSet = types.SetNull(types.StringType)
 	}
 	return types.ObjectValue(customBlockListControlAttrTypes, map[string]attr.Value{
-		"enabled":  types.BoolValue(enabled),
-		"patterns": patternsSet,
+		"enabled":               types.BoolValue(enabled),
+		"patterns":              patternsSet,
+		"block_pseudo_versions": types.SetNull(types.StringType),
+		"block_yanked_versions": types.BoolValue(false),
 	})
 }
 
 func buildTestNpmSettingsObject(rewriteTarballURLs bool) (types.Object, diag.Diagnostics) {
 	return types.ObjectValue(npmSettingsAttrTypes, map[string]attr.Value{
-		"rewrite_tarball_urls": types.BoolValue(rewriteTarballURLs),
+		"rewrite_tarball_urls":            types.BoolValue(rewriteTarballURLs),
+		"block_message_template":          types.StringNull(),
+		"hidden_versions_notice_template": types.StringNull(),
+	})
+}
+
+func buildTestNpmSettingsObjectWithTemplates(rewriteTarballURLs bool, block, notice types.String) (types.Object, diag.Diagnostics) {
+	return types.ObjectValue(npmSettingsAttrTypes, map[string]attr.Value{
+		"rewrite_tarball_urls":            types.BoolValue(rewriteTarballURLs),
+		"block_message_template":          block,
+		"hidden_versions_notice_template": notice,
 	})
 }
 
@@ -1318,4 +1333,364 @@ resource "stepsecurity_secure_registry_policy" "nuget_test" {
   }
 }
 `, blockListEnabled, quotedPatternsList(patterns))
+}
+
+func TestValidateMessageTemplate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		tmpl    string
+		max     int
+		allowed []string
+		wantErr string
+	}{
+		{"plain text", "Contact #platform-security", 500, blockMessagePlaceholders, ""},
+		{"all block placeholders", "{{package}} {{version}} {{control}} {{reason}} {{ecosystem}}", 500, blockMessagePlaceholders, ""},
+		{"all notice placeholders", "{{package}} {{count}} {{versions}} {{cooldown_days}} {{details}} {{ecosystem}}", 300, noticePlaceholders, ""},
+		{"whitespace inside braces", "{{ package }} blocked", 500, blockMessagePlaceholders, ""},
+		{"unknown placeholder", "ask {{owner}}", 500, blockMessagePlaceholders, "unknown placeholder {{owner}}"},
+		{"notice placeholder in block template", "{{count}}", 500, blockMessagePlaceholders, "unknown placeholder {{count}}"},
+		{"block placeholder in notice template", "{{reason}}", 300, noticePlaceholders, "unknown placeholder {{reason}}"},
+		{"unterminated open", "{{package", 500, blockMessagePlaceholders, "unterminated or malformed"},
+		{"stray close", "package}}", 500, blockMessagePlaceholders, "unterminated or malformed"},
+		{"trailing open braces", "{{package}} {{", 500, blockMessagePlaceholders, "unterminated or malformed"},
+		{"newline", "line1\nline2", 500, blockMessagePlaceholders, "single line"},
+		{"tab", "a\tb", 500, blockMessagePlaceholders, "single line"},
+		{"del char", "a\x7fb", 500, blockMessagePlaceholders, "single line"},
+		{"exactly max length", strings.Repeat("a", 500), 500, blockMessagePlaceholders, ""},
+		{"over max length", strings.Repeat("a", 501), 500, blockMessagePlaceholders, "at most 500 characters"},
+		{"length counts characters not bytes", strings.Repeat("é", 300), 300, noticePlaceholders, ""},
+		{"notice over max", strings.Repeat("a", 301), 300, noticePlaceholders, "at most 300 characters"},
+		{"empty clears", "", 500, blockMessagePlaceholders, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateMessageTemplate(tt.tmpl, tt.max, tt.allowed)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestMessageTemplateValidator_SkipsNullAndUnknown(t *testing.T) {
+	t.Parallel()
+
+	v := messageTemplate(maxBlockMessageTemplateLen, blockMessagePlaceholders)
+	for _, val := range []types.String{types.StringNull(), types.StringUnknown()} {
+		resp := &validator.StringResponse{}
+		v.ValidateString(context.Background(), validator.StringRequest{ConfigValue: val}, resp)
+		assert.False(t, resp.Diagnostics.HasError())
+	}
+	resp := &validator.StringResponse{}
+	v.ValidateString(context.Background(), validator.StringRequest{ConfigValue: types.StringValue("{{bad}}")}, resp)
+	assert.True(t, resp.Diagnostics.HasError())
+}
+
+func TestSecureRegistryPolicyResource_buildUpsertRequest_NpmTemplates(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	r := &secureRegistryPolicyResource{}
+	str := func(s string) *string { return &s }
+
+	tests := []struct {
+		name       string
+		plan       types.Object
+		prev       *secureRegistryPolicyResourceModel
+		wantBlock  *string
+		wantNotice *string
+	}{
+		{
+			name:       "both set are sent",
+			plan:       mustObj(t, true, types.StringValue("b {{package}}"), types.StringValue("n {{count}}")),
+			wantBlock:  str("b {{package}}"),
+			wantNotice: str("n {{count}}"),
+		},
+		{
+			name: "never set stays omitted",
+			plan: mustObj(t, true, types.StringNull(), types.StringNull()),
+		},
+		{
+			name:       "removed attributes are sent as empty string",
+			plan:       mustObj(t, true, types.StringNull(), types.StringNull()),
+			prev:       &secureRegistryPolicyResourceModel{NpmSettings: mustObj(t, true, types.StringValue("b"), types.StringValue("n"))},
+			wantBlock:  str(""),
+			wantNotice: str(""),
+		},
+		{
+			name:       "only one removed",
+			plan:       mustObj(t, false, types.StringValue("b2"), types.StringNull()),
+			prev:       &secureRegistryPolicyResourceModel{NpmSettings: mustObj(t, true, types.StringValue("b"), types.StringValue("n"))},
+			wantBlock:  str("b2"),
+			wantNotice: str(""),
+		},
+		{
+			name:       "whole npm_settings block removed clears templates",
+			plan:       types.ObjectNull(npmSettingsAttrTypes),
+			prev:       &secureRegistryPolicyResourceModel{NpmSettings: mustObj(t, true, types.StringValue("b"), types.StringValue("n"))},
+			wantBlock:  str(""),
+			wantNotice: str(""),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			plan := &secureRegistryPolicyResourceModel{Registry: types.StringValue("npm"), NpmSettings: tt.plan}
+			var diags diag.Diagnostics
+			req := r.buildUpsertRequest(ctx, plan, tt.prev, &diags)
+			require.False(t, diags.HasError())
+			require.NotNil(t, req.NpmSettings)
+			assert.Equal(t, tt.wantBlock, req.NpmSettings.BlockMessageTemplate)
+			assert.Equal(t, tt.wantNotice, req.NpmSettings.HiddenVersionsNoticeTemplate)
+		})
+	}
+}
+
+func mustObj(t *testing.T, rewrite bool, block, notice types.String) types.Object {
+	t.Helper()
+	obj, diags := buildTestNpmSettingsObjectWithTemplates(rewrite, block, notice)
+	require.False(t, diags.HasError())
+	return obj
+}
+
+func TestSecureRegistryPolicyResource_applyAPIResponse_NpmTemplates(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	r := &secureRegistryPolicyResource{}
+	str := func(s string) *string { return &s }
+
+	tests := []struct {
+		name       string
+		ref        types.Object
+		api        *stepsecurityapi.NpmSettingsControl
+		wantNull   bool
+		wantBlock  types.String
+		wantNotice types.String
+	}{
+		{
+			name:       "templates in API response populate state",
+			ref:        types.ObjectNull(npmSettingsAttrTypes),
+			api:        &stepsecurityapi.NpmSettingsControl{RewriteTarballURLs: false, BlockMessageTemplate: str("b"), HiddenVersionsNoticeTemplate: str("n")},
+			wantBlock:  types.StringValue("b"),
+			wantNotice: types.StringValue("n"),
+		},
+		{
+			name:       "absent fields map to null with no drift when tracked",
+			ref:        mustObj(t, true, types.StringNull(), types.StringNull()),
+			api:        &stepsecurityapi.NpmSettingsControl{RewriteTarballURLs: true},
+			wantBlock:  types.StringNull(),
+			wantNotice: types.StringNull(),
+		},
+		{
+			name:       "empty string maps to null",
+			ref:        mustObj(t, true, types.StringNull(), types.StringNull()),
+			api:        &stepsecurityapi.NpmSettingsControl{RewriteTarballURLs: true, BlockMessageTemplate: str(""), HiddenVersionsNoticeTemplate: str("")},
+			wantBlock:  types.StringNull(),
+			wantNotice: types.StringNull(),
+		},
+		{
+			name:       "explicit empty string in ref is preserved",
+			ref:        mustObj(t, true, types.StringValue(""), types.StringValue("")),
+			api:        &stepsecurityapi.NpmSettingsControl{RewriteTarballURLs: true},
+			wantBlock:  types.StringValue(""),
+			wantNotice: types.StringValue(""),
+		},
+		{
+			name:       "empty string in ref is replaced by a non-empty API value",
+			ref:        mustObj(t, true, types.StringValue(""), types.StringNull()),
+			api:        &stepsecurityapi.NpmSettingsControl{RewriteTarballURLs: true, BlockMessageTemplate: str("b")},
+			wantBlock:  types.StringValue("b"),
+			wantNotice: types.StringNull(),
+		},
+		{
+			name:     "untracked, all defaults stays null",
+			ref:      types.ObjectNull(npmSettingsAttrTypes),
+			api:      &stepsecurityapi.NpmSettingsControl{},
+			wantNull: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ref := &secureRegistryPolicyResourceModel{NpmSettings: tt.ref}
+			model := &secureRegistryPolicyResourceModel{NpmSettings: types.ObjectNull(npmSettingsAttrTypes)}
+			var diags diag.Diagnostics
+			r.applyAPIResponseToModel(ctx, ref, model, &stepsecurityapi.SecureRegistryControls{Registry: "npm", NpmSettings: tt.api}, &diags)
+			require.False(t, diags.HasError())
+			if tt.wantNull {
+				assert.True(t, model.NpmSettings.IsNull())
+				return
+			}
+			require.False(t, model.NpmSettings.IsNull())
+			attrs := model.NpmSettings.Attributes()
+			assert.Equal(t, tt.wantBlock, attrs["block_message_template"])
+			assert.Equal(t, tt.wantNotice, attrs["hidden_versions_notice_template"])
+		})
+	}
+}
+
+// newEcosystemModel builds a full config model with every control null, for ValidateConfig tests.
+func newEcosystemModel(registry string) secureRegistryPolicyResourceModel {
+	return secureRegistryPolicyResourceModel{
+		Registry:                   types.StringValue(registry),
+		CooldownControl:            types.ObjectNull(cooldownControlAttrTypes),
+		CompromisedPackagesControl: types.ObjectNull(compromisedPackagesControlAttrTypes),
+		TyposquattingControl:       types.ObjectNull(typosquattingControlAttrTypes),
+		CustomBlockListControl:     types.ObjectNull(customBlockListControlAttrTypes),
+		NpmSettings:                types.ObjectNull(npmSettingsAttrTypes),
+		GoSettings:                 types.ObjectNull(goSettingsAttrTypes),
+	}
+}
+
+func blockListWith(t *testing.T, pseudo []string, yanked bool) types.Object {
+	t.Helper()
+	pseudoSet := types.SetNull(types.StringType)
+	if pseudo != nil {
+		vals := make([]attr.Value, len(pseudo))
+		for i, v := range pseudo {
+			vals[i] = types.StringValue(v)
+		}
+		var d diag.Diagnostics
+		pseudoSet, d = types.SetValue(types.StringType, vals)
+		require.False(t, d.HasError())
+	}
+	obj, d := types.ObjectValue(customBlockListControlAttrTypes, map[string]attr.Value{
+		"enabled":               types.BoolValue(true),
+		"patterns":              types.SetNull(types.StringType),
+		"block_pseudo_versions": pseudoSet,
+		"block_yanked_versions": types.BoolValue(yanked),
+	})
+	require.False(t, d.HasError())
+	return obj
+}
+
+func TestSecureRegistryPolicyResource_ValidateConfig_NewEcosystems(t *testing.T) {
+	t.Parallel()
+
+	goSettings := types.ObjectValueMust(goSettingsAttrTypes, map[string]attr.Value{"proxy_checksum_db": types.BoolValue(true)})
+
+	tests := []struct {
+		name      string
+		registry  string
+		mutate    func(t *testing.T, m *secureRegistryPolicyResourceModel)
+		wantError bool
+	}{
+		{"go plain", "go", func(*testing.T, *secureRegistryPolicyResourceModel) {}, false},
+		{"ruby plain", "ruby", func(*testing.T, *secureRegistryPolicyResourceModel) {}, false},
+		{"cargo plain", "cargo", func(*testing.T, *secureRegistryPolicyResourceModel) {}, false},
+		{"go_settings on go", "go", func(_ *testing.T, m *secureRegistryPolicyResourceModel) { m.GoSettings = goSettings }, false},
+		{"go_settings on npm", "npm", func(_ *testing.T, m *secureRegistryPolicyResourceModel) { m.GoSettings = goSettings }, true},
+		{"go_settings on cargo", "cargo", func(_ *testing.T, m *secureRegistryPolicyResourceModel) { m.GoSettings = goSettings }, true},
+		{"go_settings unknown on npm defers", "npm", func(_ *testing.T, m *secureRegistryPolicyResourceModel) {
+			m.GoSettings = types.ObjectUnknown(goSettingsAttrTypes)
+		}, false},
+		{"pseudo versions on go", "go", func(t *testing.T, m *secureRegistryPolicyResourceModel) {
+			m.CustomBlockListControl = blockListWith(t, []string{"*"}, false)
+		}, false},
+		{"pseudo versions on npm", "npm", func(t *testing.T, m *secureRegistryPolicyResourceModel) {
+			m.CustomBlockListControl = blockListWith(t, []string{"*"}, false)
+		}, true},
+		{"yanked on cargo", "cargo", func(t *testing.T, m *secureRegistryPolicyResourceModel) {
+			m.CustomBlockListControl = blockListWith(t, nil, true)
+		}, false},
+		{"yanked on ruby", "ruby", func(t *testing.T, m *secureRegistryPolicyResourceModel) {
+			m.CustomBlockListControl = blockListWith(t, nil, true)
+		}, true},
+		{"typosquatting on go", "go", func(t *testing.T, m *secureRegistryPolicyResourceModel) {
+			m.TyposquattingControl = mustBuildTestTyposquattingObject(t, true)
+		}, true},
+		{"npm_settings on ruby", "ruby", func(t *testing.T, m *secureRegistryPolicyResourceModel) {
+			m.NpmSettings = mustBuildTestNpmSettingsObject(t, true)
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newEcosystemModel(tt.registry)
+			tt.mutate(t, &m)
+			resp := &fwresource.ValidateConfigResponse{}
+			(&secureRegistryPolicyResource{}).ValidateConfig(context.Background(), fwresource.ValidateConfigRequest{Config: testSecureRegistryPolicyConfig(t, m)}, resp)
+			assert.Equal(t, tt.wantError, resp.Diagnostics.HasError(), "diagnostics: %v", resp.Diagnostics)
+		})
+	}
+}
+
+func TestSecureRegistryPolicyResource_buildUpsertRequest_NewEcosystemControls(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	r := &secureRegistryPolicyResource{}
+
+	plan := &secureRegistryPolicyResourceModel{
+		Registry:               types.StringValue("go"),
+		CustomBlockListControl: blockListWith(t, []string{"github.com/example-org/*"}, false),
+		GoSettings:             types.ObjectValueMust(goSettingsAttrTypes, map[string]attr.Value{"proxy_checksum_db": types.BoolValue(true)}),
+	}
+	var diags diag.Diagnostics
+	req := r.buildUpsertRequest(ctx, plan, nil, &diags)
+	require.False(t, diags.HasError())
+	assert.Equal(t, []string{"github.com/example-org/*"}, req.CustomBlockList.BlockPseudoVersions)
+	require.NotNil(t, req.GoSettings)
+	assert.True(t, req.GoSettings.ProxyChecksumDB)
+
+	cargoPlan := &secureRegistryPolicyResourceModel{Registry: types.StringValue("cargo"), CustomBlockListControl: blockListWith(t, nil, true)}
+	req = r.buildUpsertRequest(ctx, cargoPlan, nil, &diags)
+	require.False(t, diags.HasError())
+	assert.True(t, req.CustomBlockList.BlockYankedVersions)
+	assert.Nil(t, req.CustomBlockList.BlockPseudoVersions)
+
+	// go_settings removed from config resets on the backend.
+	prev := &secureRegistryPolicyResourceModel{GoSettings: plan.GoSettings}
+	removed := &secureRegistryPolicyResourceModel{Registry: types.StringValue("go"), GoSettings: types.ObjectNull(goSettingsAttrTypes)}
+	req = r.buildUpsertRequest(ctx, removed, prev, &diags)
+	require.NotNil(t, req.GoSettings)
+	assert.False(t, req.GoSettings.ProxyChecksumDB)
+}
+
+func TestSecureRegistryPolicyResource_applyAPIResponse_NewEcosystemControls(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	r := &secureRegistryPolicyResource{}
+	var diags diag.Diagnostics
+
+	ref := &secureRegistryPolicyResourceModel{GoSettings: types.ObjectNull(goSettingsAttrTypes), CustomBlockListControl: types.ObjectNull(customBlockListControlAttrTypes)}
+	model := &secureRegistryPolicyResourceModel{}
+	r.applyAPIResponseToModel(ctx, ref, model, &stepsecurityapi.SecureRegistryControls{
+		Registry:        "go",
+		GoSettings:      &stepsecurityapi.GoSettingsControl{ProxyChecksumDB: true},
+		CustomBlockList: &stepsecurityapi.CustomBlockListControl{Enabled: true, BlockPseudoVersions: []string{"*"}},
+	}, &diags)
+	require.False(t, diags.HasError())
+	assert.Equal(t, types.BoolValue(true), model.GoSettings.Attributes()["proxy_checksum_db"])
+	assert.False(t, model.CustomBlockListControl.Attributes()["block_pseudo_versions"].(types.Set).IsNull())
+
+	// Defaults on an untracked block stay null and unset pseudo versions map to null (no drift).
+	model = &secureRegistryPolicyResourceModel{}
+	r.applyAPIResponseToModel(ctx, ref, model, &stepsecurityapi.SecureRegistryControls{
+		Registry:        "go",
+		GoSettings:      &stepsecurityapi.GoSettingsControl{},
+		CustomBlockList: &stepsecurityapi.CustomBlockListControl{Enabled: true},
+	}, &diags)
+	assert.True(t, model.GoSettings.IsNull())
+	assert.True(t, model.CustomBlockListControl.Attributes()["block_pseudo_versions"].(types.Set).IsNull())
+
+	// Cargo yanked flag round-trips.
+	model = &secureRegistryPolicyResourceModel{}
+	r.applyAPIResponseToModel(ctx, ref, model, &stepsecurityapi.SecureRegistryControls{
+		Registry:        "cargo",
+		CustomBlockList: &stepsecurityapi.CustomBlockListControl{Enabled: true, BlockYankedVersions: true},
+	}, &diags)
+	assert.Equal(t, types.BoolValue(true), model.CustomBlockListControl.Attributes()["block_yanked_versions"])
 }

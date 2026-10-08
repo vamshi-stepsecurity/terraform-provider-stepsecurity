@@ -170,6 +170,13 @@ func (r *githubChecksResource) Schema(_ context.Context, _ resource.SchemaReques
 
 func (r *githubChecksResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	owner := req.ID
+	if owner == "" || strings.Contains(owner, "/") {
+		resp.Diagnostics.AddError(
+			"Invalid import ID",
+			fmt.Sprintf("Expected the GitHub organization name (e.g. \"my-org\"), got %q. Do not include a \"/\".", req.ID),
+		)
+		return
+	}
 	// Set the owner and ID in the state
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("owner"), owner)...)
 

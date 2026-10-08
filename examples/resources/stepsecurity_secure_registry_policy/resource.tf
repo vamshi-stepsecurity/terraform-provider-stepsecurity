@@ -37,6 +37,10 @@ resource "stepsecurity_secure_registry_policy" "npm_full" {
 
   npm_settings = {
     rewrite_tarball_urls = true
+
+    # Optional, npm only. Placeholders are validated at plan time.
+    block_message_template          = "False positive? Raise a PR against example-org/exclusions for {{package}} (control: {{control}})."
+    hidden_versions_notice_template = "{{count}} of {{package}} hidden ({{details}}). Questions: #platform-security"
   }
 }
 
@@ -149,6 +153,72 @@ resource "stepsecurity_secure_registry_policy" "nuget_full" {
   custom_block_list_control = {
     enabled  = true
     patterns = ["Newtonsoft.Json@1*"]
+  }
+}
+
+# Go modules: cooldown, compromised packages, block list and go_settings.
+# (typosquatting_control and npm_settings are not applicable to go)
+resource "stepsecurity_secure_registry_policy" "go_full" {
+  registry = "go"
+
+  cooldown_control = {
+    enabled        = true
+    period_in_days = 7
+  }
+
+  compromised_packages_control = {
+    enabled = true
+  }
+
+  custom_block_list_control = {
+    enabled  = true
+    patterns = ["github.com/example-org/legacy@*"]
+
+    # Require released tags: refuse pseudo-versions and raw commit or branch revisions.
+    block_pseudo_versions = ["*"]
+  }
+
+  go_settings = {
+    proxy_checksum_db = false
+  }
+}
+
+# RubyGems: typosquatting_control, npm_settings and go_settings are not applicable.
+resource "stepsecurity_secure_registry_policy" "ruby_full" {
+  registry = "ruby"
+
+  cooldown_control = {
+    enabled        = true
+    period_in_days = 7
+  }
+
+  compromised_packages_control = {
+    enabled = true
+  }
+
+  custom_block_list_control = {
+    enabled  = true
+    patterns = ["example-gem@*"]
+  }
+}
+
+# Cargo (crates.io): block_yanked_versions is cargo-only.
+resource "stepsecurity_secure_registry_policy" "cargo_full" {
+  registry = "cargo"
+
+  cooldown_control = {
+    enabled        = true
+    period_in_days = 7
+  }
+
+  compromised_packages_control = {
+    enabled = true
+  }
+
+  custom_block_list_control = {
+    enabled               = true
+    patterns              = ["example-crate@*"]
+    block_yanked_versions = true
   }
 }
 

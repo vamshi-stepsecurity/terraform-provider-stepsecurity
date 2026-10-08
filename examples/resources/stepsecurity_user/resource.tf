@@ -53,6 +53,27 @@ resource "stepsecurity_user" "email_suffix_user" {
   ]
 }
 
+# creates a custom role and assigns it to a user. The policy role is the custom role's name.
+resource "stepsecurity_role" "engineer" {
+  name = "engineer"
+  permissions = [
+    { resource = "workflow-runs", action = "read" },
+  ]
+}
+
+resource "stepsecurity_user" "custom_role_user" {
+  user_name = "test-user"
+  auth_type = "Github"
+  policies = [
+    {
+      type         = "github"
+      role         = stepsecurity_role.engineer.name
+      scope        = "organization"
+      organization = "test-organization"
+    }
+  ]
+}
+
 # For importing existing user to terraform state
 # this will be helpful to manage existing user using terraform
 # alternative to this is to use terraform import command

@@ -3,12 +3,12 @@
 page_title: "stepsecurity_developer_mdm_package_config_policy Resource - stepsecurity"
 subcategory: ""
 description: |-
-  Manages a Developer MDM package manager configuration policy in StepSecurity. The policy points a managed device's npm configuration (the user-level .npmrc) at the tenant's StepSecurity secure registry; StepSecurity compiles and enforces it on assigned devices. The registry URL and the tenant's registry auth key are injected by StepSecurity at compile time and are never part of this resource. Creating or updating a policy fails with a 409 while the tenant's StepSecurity secure registry is not onboarded.
+  Manages a Developer MDM package manager configuration policy in StepSecurity. The policy governs a managed device's package manager configuration (npm's user-level .npmrc, pip/uv configuration for PyPI, or the Go module proxy); StepSecurity compiles and enforces it on assigned devices. The StepSecurity registry URL and the tenant's registry auth key are injected by StepSecurity at compile time and are never part of this resource. Whenever the policy selects the StepSecurity registry -- which is the default, and is required today for pypi and go -- creating or updating it fails with a 409 while the tenant's StepSecurity secure registry is not onboarded. A settings-only npm policy (registry_type = "none") does not need the secure registry.
 ---
 
 # stepsecurity_developer_mdm_package_config_policy (Resource)
 
-Manages a Developer MDM package manager configuration policy in StepSecurity. The policy points a managed device's npm configuration (the user-level `.npmrc`) at the tenant's StepSecurity secure registry; StepSecurity compiles and enforces it on assigned devices. The registry URL and the tenant's registry auth key are injected by StepSecurity at compile time and are never part of this resource. Creating or updating a policy fails with a 409 while the tenant's StepSecurity secure registry is not onboarded.
+Manages a Developer MDM package manager configuration policy in StepSecurity. The policy governs a managed device's package manager configuration (npm's user-level `.npmrc`, pip/uv configuration for PyPI, or the Go module proxy); StepSecurity compiles and enforces it on assigned devices. The StepSecurity registry URL and the tenant's registry auth key are injected by StepSecurity at compile time and are never part of this resource. Whenever the policy selects the StepSecurity registry -- which is the default, and is required today for `pypi` and `go` -- creating or updating it fails with a 409 while the tenant's StepSecurity secure registry is not onboarded. A settings-only npm policy (`registry_type = "none"`) does not need the secure registry.
 
 ## Example Usage
 
@@ -33,21 +33,76 @@ resource "stepsecurity_developer_mdm_package_config_policy" "npm_secure_registry
   description = "Route npm installs through the StepSecurity secure registry"
 }
 
+# Combined: the StepSecurity registry plus extra .npmrc keys. Omitting registry_type keeps
+# the StepSecurity registry -- adding settings never silently opts a policy out of it.
+resource "stepsecurity_developer_mdm_package_config_policy" "npm_combined" {
+  name        = "npm secure registry with settings"
+  description = "StepSecurity registry plus shared npm client settings"
+
+  settings = {
+    "fetch-retries"      = "3"
+    "audit"              = "false"
+    "@internal:registry" = "https://registry.example.com/npm/"
+  }
+}
+
+# Settings-only: no StepSecurity registry at all, which has to be selected explicitly with
+# registry_type = "none". The settings then have to define the registry themselves.
+#
+# "$${EXAMPLE_NPM_TOKEN}" is escaped HCL: Terraform writes the literal string
+# "${EXAMPLE_NPM_TOKEN}" into .npmrc, and the device's npm resolves it from the environment
+# at install time. Do not interpolate a real credential here -- policy authoring spec is
+# stored in Terraform state.
+resource "stepsecurity_developer_mdm_package_config_policy" "npm_settings_only" {
+  name          = "npm third-party registry"
+  description   = "Default registry served by a third party, with a scoped override"
+  registry_type = "none"
+
+  settings = {
+    "registry"                               = "https://registry.example.com/npm/"
+    "@example:registry"                      = "https://registry.example.com/npm/"
+    "//registry.example.com/npm/:_authToken" = "$${EXAMPLE_NPM_TOKEN}"
+    "fetch-retries"                          = "3"
+  }
+}
+
+# PyPI. clients is required and accepts pip and uv; registry_type defaults to stepsecurity,
+# which is the only value the API accepts for pypi today.
+resource "stepsecurity_developer_mdm_package_config_policy" "pypi" {
+  name        = "Python packages"
+  description = "Route pip and uv installs through the StepSecurity secure registry"
+  target      = "pypi"
+  clients     = ["pip", "uv"]
+}
+
+# Go. The module proxy is configured from the StepSecurity registry; there is nothing else
+# to select, so only the target changes.
+resource "stepsecurity_developer_mdm_package_config_policy" "go" {
+  name        = "Go packages"
+  description = "Route go module downloads through the StepSecurity secure registry"
+  target      = "go"
+}
+
 # A policy on its own enforces nothing; it has to be bundled into a profile and assigned.
-# This profile uses enforcement = "dmg" so the agent writes .npmrc itself. "mdm" is also
-# valid for this category, with the package script deployed through the console and the
-# agent only verifying what it observes — but Terraform cannot export that script, because
-# the compiled artifact embeds the tenant's registry auth key.
-resource "stepsecurity_developer_mdm_profile" "npm_secure_registry" {
-  name        = "npm secure registry"
+# This profile uses enforcement = "dmg" so the agent writes the managed config itself. "mdm"
+# is also valid for this category, with the package script deployed through the console and
+# the agent only verifying what it observes -- but Terraform cannot export that script,
+# because the compiled artifact embeds the tenant's registry auth key.
+#
+# A profile carries at most one policy per ecosystem, so the npm policies above are
+# alternatives: pick one. Assign explicit device IDs rather than the whole fleet.
+resource "stepsecurity_developer_mdm_profile" "packages" {
+  name        = "package configuration"
   enforcement = "dmg"
 
   policy_ids = [
-    stepsecurity_developer_mdm_package_config_policy.npm_secure_registry.policy_id,
+    stepsecurity_developer_mdm_package_config_policy.npm_combined.policy_id,
+    stepsecurity_developer_mdm_package_config_policy.pypi.policy_id,
+    stepsecurity_developer_mdm_package_config_policy.go.policy_id,
   ]
 
   assignment = {
-    all_devices = true
+    device_ids = ["REPLACE_WITH_DEVICE_ID"]
   }
 }
 ```
@@ -61,9 +116,11 @@ resource "stepsecurity_developer_mdm_profile" "npm_secure_registry" {
 
 ### Optional
 
+- `clients` (Set of String) PyPI only, and required for it: which Python clients the policy configures. Valid members are `pip` and `uv`. Order is irrelevant.
 - `description` (String) Optional human-readable description.
-- `registry_type` (String) Which registry the managed npm config points at. Defaults to `stepsecurity` (the tenant's StepSecurity secure registry), the only supported value in v1.
-- `target` (String) Package ecosystem this policy governs. Defaults to `npm` (the only supported target).
+- `registry_type` (String) Which registry the managed package config points at. Defaults to `stepsecurity` (the tenant's StepSecurity secure registry) for every target, including when npm `settings` are present -- adding settings to an existing policy keeps the StepSecurity registry and produces a combined configuration. The only other value is `none`, which is npm only and selects a settings-only policy: no provider-managed StepSecurity registry, so `settings` must carry its own `registry` or `@scope:registry` entry. `none` is a provider-side selector and is never sent to the API. `pypi` and `go` require `stepsecurity` today.
+- `settings` (Map of String) npm only. Additional `.npmrc` keys written to the managed device, for example `fetch-retries` or a third-party `@scope:registry`. Values are always strings, including numeric- and boolean-looking ones. Registry URLs must already be in the API's canonical form (https, no embedded credentials, no query or fragment, lowercase host, a percent-encoded path, exactly one trailing slash) and keys and values must have no leading or trailing spaces or tabs, because the API rewrites non-canonical input and Terraform would then report an inconsistent result after apply. Authenticate with an environment reference such as `$${EXAMPLE_NPM_TOKEN}`, which is written literally into `.npmrc` for the device to resolve; never place a real credential here. Omit the attribute to remove all settings; an empty map is rejected.
+- `target` (String) Package ecosystem this policy governs: `npm` (default), `pypi`, or `go`. The API rejects changing a policy's target in place, so a change here replaces the policy.
 
 ### Read-Only
 
@@ -87,4 +144,8 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 # Format: <policy_id>
 
 terraform import stepsecurity_developer_mdm_package_config_policy.npm_secure_registry POLICY_ID
+
+# The configuration you import into has to spell out the registry selection: a settings-only
+# npm policy reads back as registry_type = "none", so the HCL needs that value explicitly for
+# the first plan to come back with no changes. Every other shape defaults to "stepsecurity".
 ```

@@ -4,7 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"sort"
+	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -21,9 +26,17 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &developerMDMPackageConfigPolicyResource{}
-	_ resource.ResourceWithConfigure   = &developerMDMPackageConfigPolicyResource{}
-	_ resource.ResourceWithImportState = &developerMDMPackageConfigPolicyResource{}
+	_ resource.Resource                   = &developerMDMPackageConfigPolicyResource{}
+	_ resource.ResourceWithConfigure      = &developerMDMPackageConfigPolicyResource{}
+	_ resource.ResourceWithImportState    = &developerMDMPackageConfigPolicyResource{}
+	_ resource.ResourceWithValidateConfig = &developerMDMPackageConfigPolicyResource{}
+)
+
+// Backend caps on npm settings, mirrored here so an oversized map fails at plan time.
+const (
+	developerMDMMaxNPMSettings          = 50
+	developerMDMMaxNPMSettingKeyBytes   = 512
+	developerMDMMaxNPMSettingValueBytes = 4096
 )
 
 // NewDeveloperMDMPackageConfigPolicyResource is a helper function to simplify the provider implementation.
@@ -39,7 +52,9 @@ type developerMDMPackageConfigPolicyResource struct {
 // developerMDMPackageConfigPolicyModel maps the resource schema data. Unlike the IDE
 // extension policy, package_config carries no rules and no user-facing mode: the backend
 // enforces a single meaningful mode (allowlist, "the allowed registry"), so it is not
-// exposed here.
+// exposed here. settings and clients are framework collections rather than Go maps and
+// slices so null, known empty, wholly unknown, and known-with-unknown-elements stay four
+// distinguishable states through configuration and planning.
 type developerMDMPackageConfigPolicyModel struct {
 	ID           types.String `tfsdk:"id"`
 	PolicyID     types.String `tfsdk:"policy_id"`
@@ -47,6 +62,8 @@ type developerMDMPackageConfigPolicyModel struct {
 	Description  types.String `tfsdk:"description"`
 	Target       types.String `tfsdk:"target"`
 	RegistryType types.String `tfsdk:"registry_type"`
+	Settings     types.Map    `tfsdk:"settings"`
+	Clients      types.Set    `tfsdk:"clients"`
 	CreatedBy    types.String `tfsdk:"created_by"`
 	CreatedAt    types.String `tfsdk:"created_at"`
 	UpdatedBy    types.String `tfsdk:"updated_by"`
@@ -62,11 +79,13 @@ func (r *developerMDMPackageConfigPolicyResource) Metadata(_ context.Context, re
 func (r *developerMDMPackageConfigPolicyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages a Developer MDM package manager configuration policy in StepSecurity. " +
-			"The policy points a managed device's npm configuration (the user-level `.npmrc`) at the tenant's " +
-			"StepSecurity secure registry; StepSecurity compiles and enforces it on assigned devices. The registry " +
-			"URL and the tenant's registry auth key are injected by StepSecurity at compile time and are never part of this " +
-			"resource. Creating or updating a policy fails with a 409 while the tenant's StepSecurity secure " +
-			"registry is not onboarded.",
+			"The policy governs a managed device's package manager configuration (npm's user-level `.npmrc`, " +
+			"pip/uv configuration for PyPI, or the Go module proxy); StepSecurity compiles and enforces it on " +
+			"assigned devices. The StepSecurity registry URL and the tenant's registry auth key are injected by " +
+			"StepSecurity at compile time and are never part of this resource. Whenever the policy selects the " +
+			"StepSecurity registry -- which is the default, and is required today for `pypi` and `go` -- creating " +
+			"or updating it fails with a 409 while the tenant's StepSecurity secure registry is not onboarded. " +
+			"A settings-only npm policy (`registry_type = \"none\"`) does not need the secure registry.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,
@@ -94,22 +113,78 @@ func (r *developerMDMPackageConfigPolicyResource) Schema(_ context.Context, _ re
 				MarkdownDescription: "Optional human-readable description.",
 			},
 			"target": schema.StringAttribute{
-				Optional:            true,
-				Computed:            true,
-				Default:             stringdefault.StaticString(stepsecurityapi.DeveloperMDMTargetNPM),
-				MarkdownDescription: "Package ecosystem this policy governs. Defaults to `npm` (the only supported target).",
+				Optional: true,
+				Computed: true,
+				Default:  stringdefault.StaticString(stepsecurityapi.DeveloperMDMTargetNPM),
+				MarkdownDescription: "Package ecosystem this policy governs: `npm` (default), `pypi`, or `go`. " +
+					"The API rejects changing a policy's target in place, so a change here replaces the policy.",
 				Validators: []validator.String{
-					stringvalidator.OneOf(stepsecurityapi.DeveloperMDMTargetNPM),
+					stringvalidator.OneOf(
+						stepsecurityapi.DeveloperMDMTargetNPM,
+						stepsecurityapi.DeveloperMDMTargetPyPI,
+						stepsecurityapi.DeveloperMDMTargetGo,
+					),
+				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"registry_type": schema.StringAttribute{
 				Optional: true,
 				Computed: true,
 				Default:  stringdefault.StaticString(stepsecurityapi.DeveloperMDMRegistryTypeStepSecurity),
-				MarkdownDescription: "Which registry the managed npm config points at. Defaults to `stepsecurity` " +
-					"(the tenant's StepSecurity secure registry), the only supported value in v1.",
+				MarkdownDescription: "Which registry the managed package config points at. Defaults to " +
+					"`stepsecurity` (the tenant's StepSecurity secure registry) for every target, including when " +
+					"npm `settings` are present -- adding settings to an existing policy keeps the StepSecurity " +
+					"registry and produces a combined configuration. The only other value is `none`, which is npm " +
+					"only and selects a settings-only policy: no provider-managed StepSecurity registry, so " +
+					"`settings` must carry its own `registry` or `@scope:registry` entry. `none` is a provider-side " +
+					"selector and is never sent to the API. `pypi` and `go` require `stepsecurity` today.",
 				Validators: []validator.String{
-					stringvalidator.OneOf(stepsecurityapi.DeveloperMDMRegistryTypeStepSecurity),
+					stringvalidator.OneOf(
+						stepsecurityapi.DeveloperMDMRegistryTypeStepSecurity,
+						stepsecurityapi.DeveloperMDMRegistryTypeNone,
+					),
+				},
+			},
+			"settings": schema.MapAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+				MarkdownDescription: "npm only. Additional `.npmrc` keys written to the managed device, for example " +
+					"`fetch-retries` or a third-party `@scope:registry`. Values are always strings, including " +
+					"numeric- and boolean-looking ones. Registry URLs must already be in the API's canonical form " +
+					"(https, no embedded credentials, no query or fragment, lowercase host, a percent-encoded " +
+					"path, exactly one trailing slash) and keys and values must have no leading or trailing " +
+					"spaces or tabs, because the API " +
+					"rewrites non-canonical input and Terraform would then report an inconsistent result after " +
+					"apply. Authenticate with an environment reference such as `$${EXAMPLE_NPM_TOKEN}`, which is " +
+					"written literally into `.npmrc` for the device to resolve; never place a real credential here. " +
+					"Omit the attribute to remove all settings; an empty map is rejected.",
+				Validators: []validator.Map{
+					mapvalidator.SizeAtLeast(1),
+					mapvalidator.SizeAtMost(developerMDMMaxNPMSettings),
+					mapvalidator.KeysAre(
+						stringvalidator.LengthAtLeast(1),
+						stringvalidator.LengthAtMost(developerMDMMaxNPMSettingKeyBytes),
+					),
+					mapvalidator.ValueStringsAre(
+						stringvalidator.LengthAtMost(developerMDMMaxNPMSettingValueBytes),
+					),
+				},
+			},
+			"clients": schema.SetAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+				MarkdownDescription: "PyPI only, and required for it: which Python clients the policy configures. " +
+					"Valid members are `pip` and `uv`. Order is irrelevant.",
+				Validators: []validator.Set{
+					setvalidator.SizeAtLeast(1),
+					setvalidator.ValueStringsAre(
+						stringvalidator.OneOf(
+							stepsecurityapi.DeveloperMDMPyPIClientPip,
+							stepsecurityapi.DeveloperMDMPyPIClientUv,
+						),
+					),
 				},
 			},
 			"created_by": schema.StringAttribute{
@@ -150,6 +225,16 @@ func (r *developerMDMPackageConfigPolicyResource) Configure(_ context.Context, r
 	r.client = client
 }
 
+// ValidateConfig runs the target-specific combination checks that schema validators cannot express.
+func (r *developerMDMPackageConfigPolicyResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var model developerMDMPackageConfigPolicyModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &model)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(validateDeveloperMDMPackageConfigPolicy(ctx, model)...)
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *developerMDMPackageConfigPolicyResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan developerMDMPackageConfigPolicyModel
@@ -158,7 +243,14 @@ func (r *developerMDMPackageConfigPolicyResource) Create(ctx context.Context, re
 		return
 	}
 
-	apiReq := buildDeveloperMDMPackageConfigPolicyRequest(plan, &resp.Diagnostics)
+	// Re-validate against the resolved plan: combinations deferred during configuration
+	// validation because an input was unknown are checkable now.
+	resp.Diagnostics.Append(validateDeveloperMDMPackageConfigPolicy(ctx, plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	apiReq := buildDeveloperMDMPackageConfigPolicyRequest(ctx, plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -168,13 +260,12 @@ func (r *developerMDMPackageConfigPolicyResource) Create(ctx context.Context, re
 		resp.Diagnostics.AddError(
 			"Error creating Developer MDM package config policy",
 			"Could not create policy, unexpected error: "+err.Error()+
-				"\n\nA 409 here means the tenant's StepSecurity secure registry is not onboarded. "+
-				"Onboard it in the StepSecurity console before creating this policy.",
+				developerMDMPackageConfigSecureRegistryHint(plan),
 		)
 		return
 	}
 
-	applyDeveloperMDMPackageConfigPolicyToModel(created, &plan, &resp.Diagnostics)
+	applyDeveloperMDMPackageConfigPolicyToModel(ctx, created, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -199,7 +290,7 @@ func (r *developerMDMPackageConfigPolicyResource) Read(ctx context.Context, req 
 		return
 	}
 
-	applyDeveloperMDMPackageConfigPolicyToModel(policy, &state, &resp.Diagnostics)
+	applyDeveloperMDMPackageConfigPolicyToModel(ctx, policy, &state, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -215,7 +306,12 @@ func (r *developerMDMPackageConfigPolicyResource) Update(ctx context.Context, re
 		return
 	}
 
-	apiReq := buildDeveloperMDMPackageConfigPolicyRequest(plan, &resp.Diagnostics)
+	resp.Diagnostics.Append(validateDeveloperMDMPackageConfigPolicy(ctx, plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	apiReq := buildDeveloperMDMPackageConfigPolicyRequest(ctx, plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -224,12 +320,13 @@ func (r *developerMDMPackageConfigPolicyResource) Update(ctx context.Context, re
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error updating Developer MDM package config policy",
-			"Could not update policy, unexpected error: "+err.Error(),
+			"Could not update policy, unexpected error: "+err.Error()+
+				developerMDMPackageConfigSecureRegistryHint(plan),
 		)
 		return
 	}
 
-	applyDeveloperMDMPackageConfigPolicyToModel(updated, &plan, &resp.Diagnostics)
+	applyDeveloperMDMPackageConfigPolicyToModel(ctx, updated, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -260,15 +357,56 @@ func (r *developerMDMPackageConfigPolicyResource) ImportState(ctx context.Contex
 	resource.ImportStatePassthroughID(ctx, path.Root("policy_id"), req, resp)
 }
 
+// developerMDMPackageConfigSecureRegistryHint explains a 409 only for policies that actually
+// ask for the tenant's StepSecurity secure registry. The API client wraps errors with
+// fmt.Errorf and discards the status code, so the hint is appended rather than matched on --
+// but a settings-only npm policy never hits the secure-registry gate, so claiming it does
+// would send the user chasing the wrong problem.
+func developerMDMPackageConfigSecureRegistryHint(model developerMDMPackageConfigPolicyModel) string {
+	if developerMDMPackageConfigRegistrySelector(model.RegistryType) == stepsecurityapi.DeveloperMDMRegistryTypeNone {
+		return ""
+	}
+	return "\n\nThis policy selects the StepSecurity secure registry. A 409 here means the tenant's " +
+		"StepSecurity secure registry is not onboarded. Onboard it in the StepSecurity console before " +
+		"managing this policy."
+}
+
 // buildDeveloperMDMPackageConfigPolicyRequest converts the model into an API request body.
 // It hardcodes the category, spec version, and mode: package_config supports only spec
-// version 1 and only mode allowlist, so the request always carries those values.
-func buildDeveloperMDMPackageConfigPolicyRequest(model developerMDMPackageConfigPolicyModel, diags *diag.Diagnostics) stepsecurityapi.DeveloperMDMPolicyRequest {
-	spec := stepsecurityapi.DeveloperMDMPackageConfigSpec{
-		Registry: stepsecurityapi.DeveloperMDMRegistryRef{
-			Type: developerMDMPackageConfigRegistryType(model.RegistryType),
-		},
+// version 1 and only mode allowlist, so the request always carries those values. Only the
+// spec fields owned by the resolved target are serialized; the backend decodes each target's
+// spec with DisallowUnknownFields.
+func buildDeveloperMDMPackageConfigPolicyRequest(ctx context.Context, model developerMDMPackageConfigPolicyModel, diags *diag.Diagnostics) stepsecurityapi.DeveloperMDMPolicyRequest {
+	// Terraform resolves configuration before create or update, so this is a guard rather
+	// than a reachable path today. It exists so a future lifecycle change surfaces as an
+	// explicit error instead of silently shipping a spec built from unresolved values --
+	// which would read an unknown selector as StepSecurity or an unknown map as "no settings".
+	if unresolved := developerMDMPackageConfigUnresolved(model); len(unresolved) > 0 {
+		for _, p := range unresolved {
+			diags.AddAttributeError(
+				p,
+				"Value is not fully known",
+				fmt.Sprintf("`%s` must be fully known before the package config policy can be created or updated.", p),
+			)
+		}
+		return stepsecurityapi.DeveloperMDMPolicyRequest{}
 	}
+
+	target := developerMDMPackageConfigTarget(model.Target)
+	spec := stepsecurityapi.DeveloperMDMPackageConfigSpec{}
+	if selector := developerMDMPackageConfigRegistrySelector(model.RegistryType); selector != stepsecurityapi.DeveloperMDMRegistryTypeNone {
+		spec.Registry = &stepsecurityapi.DeveloperMDMRegistryRef{Type: selector}
+	}
+	switch target {
+	case stepsecurityapi.DeveloperMDMTargetNPM:
+		spec.Settings = developerMDMPackageConfigSettings(ctx, model.Settings, diags)
+	case stepsecurityapi.DeveloperMDMTargetPyPI:
+		spec.Clients = sortedStringSet(ctx, model.Clients, diags)
+	}
+	if diags.HasError() {
+		return stepsecurityapi.DeveloperMDMPolicyRequest{}
+	}
+
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		diags.AddError("Failed to encode policy spec", err.Error())
@@ -278,11 +416,45 @@ func buildDeveloperMDMPackageConfigPolicyRequest(model developerMDMPackageConfig
 		Name:        model.Name.ValueString(),
 		Description: model.Description.ValueString(),
 		Category:    stepsecurityapi.DeveloperMDMCategoryPackageConfig,
-		Target:      developerMDMPackageConfigTarget(model.Target),
+		Target:      target,
 		SpecVersion: stepsecurityapi.DeveloperMDMSpecVersionPackageConfig,
 		Mode:        stepsecurityapi.DeveloperMDMModeAllowlist,
 		Spec:        specJSON,
 	}
+}
+
+// developerMDMPackageConfigUnresolved lists the authoring attributes the request needs that
+// Terraform has not resolved yet, including unknown elements inside an otherwise known
+// collection. Paths are sorted so the diagnostics do not depend on map iteration order.
+func developerMDMPackageConfigUnresolved(model developerMDMPackageConfigPolicyModel) []path.Path {
+	var unresolved []path.Path
+	if model.Target.IsUnknown() {
+		unresolved = append(unresolved, path.Root("target"))
+	}
+	if model.RegistryType.IsUnknown() {
+		unresolved = append(unresolved, path.Root("registry_type"))
+	}
+	if model.Settings.IsUnknown() {
+		unresolved = append(unresolved, path.Root("settings"))
+	} else {
+		for key, value := range model.Settings.Elements() {
+			if value.IsUnknown() {
+				unresolved = append(unresolved, path.Root("settings").AtMapKey(key))
+			}
+		}
+	}
+	if model.Clients.IsUnknown() {
+		unresolved = append(unresolved, path.Root("clients"))
+	} else {
+		for _, value := range model.Clients.Elements() {
+			if value.IsUnknown() {
+				unresolved = append(unresolved, path.Root("clients"))
+				break
+			}
+		}
+	}
+	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i].String() < unresolved[j].String() })
+	return unresolved
 }
 
 // developerMDMPackageConfigTarget defaults an omitted target to npm.
@@ -293,18 +465,30 @@ func developerMDMPackageConfigTarget(target types.String) string {
 	return target.ValueString()
 }
 
-// developerMDMPackageConfigRegistryType defaults an omitted registry type to stepsecurity.
-func developerMDMPackageConfigRegistryType(registryType types.String) string {
+// developerMDMPackageConfigRegistrySelector defaults an omitted registry selector to
+// stepsecurity. The default is unconditional: adding npm settings does not silently opt an
+// existing policy out of the StepSecurity registry -- that requires an explicit "none".
+func developerMDMPackageConfigRegistrySelector(registryType types.String) string {
 	if registryType.IsNull() || registryType.IsUnknown() || registryType.ValueString() == "" {
 		return stepsecurityapi.DeveloperMDMRegistryTypeStepSecurity
 	}
 	return registryType.ValueString()
 }
 
+// developerMDMPackageConfigSettings converts a known settings map into the API representation.
+func developerMDMPackageConfigSettings(ctx context.Context, settings types.Map, diags *diag.Diagnostics) map[string]string {
+	if settings.IsNull() || settings.IsUnknown() {
+		return nil
+	}
+	var values map[string]string
+	diags.Append(settings.ElementsAs(ctx, &values, false)...)
+	return values
+}
+
 // applyDeveloperMDMPackageConfigPolicyToModel applies an API policy response into the
-// Terraform model. It rejects policies whose category is not package_config because this
-// resource cannot manage them.
-func applyDeveloperMDMPackageConfigPolicyToModel(policy *stepsecurityapi.DeveloperMDMPolicy, model *developerMDMPackageConfigPolicyModel, diags *diag.Diagnostics) {
+// Terraform model. It rejects policies whose category or target this resource cannot
+// represent rather than managing them with a lossy state.
+func applyDeveloperMDMPackageConfigPolicyToModel(ctx context.Context, policy *stepsecurityapi.DeveloperMDMPolicy, model *developerMDMPackageConfigPolicyModel, diags *diag.Diagnostics) {
 	if policy.Category != stepsecurityapi.DeveloperMDMCategoryPackageConfig {
 		diags.AddError(
 			"Unsupported Developer MDM policy category",
@@ -316,14 +500,72 @@ func applyDeveloperMDMPackageConfigPolicyToModel(policy *stepsecurityapi.Develop
 		return
 	}
 
-	model.ID = types.StringValue(policy.PolicyID)
-	model.PolicyID = types.StringValue(policy.PolicyID)
-	model.Name = types.StringValue(policy.Name)
+	// Policies created before the target field existed carry an empty target and are npm.
 	target := policy.Target
 	if target == "" {
 		target = stepsecurityapi.DeveloperMDMTargetNPM
 	}
+	switch target {
+	case stepsecurityapi.DeveloperMDMTargetNPM, stepsecurityapi.DeveloperMDMTargetPyPI, stepsecurityapi.DeveloperMDMTargetGo:
+	default:
+		diags.AddError(
+			"Unsupported Developer MDM policy target",
+			fmt.Sprintf(
+				"Policy %q has target %q, which stepsecurity_developer_mdm_package_config_policy cannot represent.",
+				policy.PolicyID, policy.Target,
+			),
+		)
+		return
+	}
+
+	var spec stepsecurityapi.DeveloperMDMPackageConfigSpec
+	if len(policy.Spec) > 0 {
+		if err := json.Unmarshal(policy.Spec, &spec); err != nil {
+			diags.AddError("Failed to decode policy spec", err.Error())
+			return
+		}
+	}
+	specEmpty := spec.Registry == nil && len(spec.Settings) == 0 && len(spec.Clients) == 0
+
+	// A returned registry wins. Otherwise the policy genuinely has no registry, which is the
+	// settings-only "none" selector -- never invent a StepSecurity registry. The one
+	// exception is the legacy npm case the resource already supported: a policy stored
+	// before the spec existed at all, which the backend still compiles as StepSecurity.
+	registrySelector := stepsecurityapi.DeveloperMDMRegistryTypeNone
+	switch {
+	case spec.Registry != nil && spec.Registry.Type != "":
+		registrySelector = spec.Registry.Type
+	case specEmpty && target == stepsecurityapi.DeveloperMDMTargetNPM:
+		registrySelector = stepsecurityapi.DeveloperMDMRegistryTypeStepSecurity
+	}
+
+	settings := types.MapNull(types.StringType)
+	if len(spec.Settings) > 0 {
+		value, settingDiags := types.MapValueFrom(ctx, types.StringType, spec.Settings)
+		diags.Append(settingDiags...)
+		if diags.HasError() {
+			return
+		}
+		settings = value
+	}
+
+	clients := types.SetNull(types.StringType)
+	if len(spec.Clients) > 0 {
+		value, clientDiags := types.SetValueFrom(ctx, types.StringType, spec.Clients)
+		diags.Append(clientDiags...)
+		if diags.HasError() {
+			return
+		}
+		clients = value
+	}
+
+	model.ID = types.StringValue(policy.PolicyID)
+	model.PolicyID = types.StringValue(policy.PolicyID)
+	model.Name = types.StringValue(policy.Name)
 	model.Target = types.StringValue(target)
+	model.RegistryType = types.StringValue(registrySelector)
+	model.Settings = settings
+	model.Clients = clients
 	model.CreatedBy = types.StringValue(policy.CreatedBy)
 	model.CreatedAt = types.StringValue(policy.CreatedAt)
 	model.UpdatedBy = types.StringValue(policy.UpdatedBy)
@@ -334,17 +576,191 @@ func applyDeveloperMDMPackageConfigPolicyToModel(policy *stepsecurityapi.Develop
 	} else {
 		model.Description = types.StringNull()
 	}
+}
 
-	registryType := stepsecurityapi.DeveloperMDMRegistryTypeStepSecurity
-	if len(policy.Spec) > 0 {
-		var spec stepsecurityapi.DeveloperMDMPackageConfigSpec
-		if err := json.Unmarshal(policy.Spec, &spec); err != nil {
-			diags.AddError("Failed to decode policy spec", err.Error())
-			return
+// validateDeveloperMDMPackageConfigPolicy checks the target-specific field combinations and
+// the canonical-form rules the API would otherwise rewrite behind Terraform's back. The full
+// npm parser, the tenant-specific collisions, and the rendered-size budget stay authoritative
+// in the API: they depend on tenant state a local mirror could only get wrong.
+//
+// Checks whose own inputs are unknown are deferred and re-run from Create and Update; known
+// invalid siblings are still reported. Unknown is never read as omitted, empty, or
+// StepSecurity.
+func validateDeveloperMDMPackageConfigPolicy(_ context.Context, model developerMDMPackageConfigPolicyModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	targetKnown := !model.Target.IsUnknown()
+	target := developerMDMPackageConfigTarget(model.Target)
+	selectorKnown := !model.RegistryType.IsUnknown()
+	selector := developerMDMPackageConfigRegistrySelector(model.RegistryType)
+
+	settingsKnown := !model.Settings.IsUnknown()
+	clientsKnown := !model.Clients.IsUnknown()
+	hasSettings := settingsKnown && !model.Settings.IsNull()
+	hasClients := clientsKnown && !model.Clients.IsNull()
+
+	if targetKnown {
+		if hasSettings && target != stepsecurityapi.DeveloperMDMTargetNPM {
+			diags.AddAttributeError(
+				path.Root("settings"),
+				"Settings are npm only",
+				fmt.Sprintf("`settings` cannot be set when `target` is %q. Remove it or set `target = \"npm\"`.", target),
+			)
 		}
-		if spec.Registry.Type != "" {
-			registryType = spec.Registry.Type
+		if hasClients && target != stepsecurityapi.DeveloperMDMTargetPyPI {
+			diags.AddAttributeError(
+				path.Root("clients"),
+				"Clients are PyPI only",
+				fmt.Sprintf("`clients` cannot be set when `target` is %q. Remove it or set `target = \"pypi\"`.", target),
+			)
+		}
+		if target == stepsecurityapi.DeveloperMDMTargetPyPI && clientsKnown && model.Clients.IsNull() {
+			diags.AddAttributeError(
+				path.Root("clients"),
+				"Clients are required for PyPI",
+				"A `pypi` package config policy must list at least one of `pip` or `uv` in `clients`.",
+			)
+		}
+		if selectorKnown && selector == stepsecurityapi.DeveloperMDMRegistryTypeNone && target != stepsecurityapi.DeveloperMDMTargetNPM {
+			diags.AddAttributeError(
+				path.Root("registry_type"),
+				"Registry type \"none\" is npm only",
+				fmt.Sprintf("The API requires the StepSecurity registry for %q policies. Remove `registry_type` or set it to %q.",
+					target, stepsecurityapi.DeveloperMDMRegistryTypeStepSecurity),
+			)
 		}
 	}
-	model.RegistryType = types.StringValue(registryType)
+
+	for _, value := range model.Clients.Elements() {
+		if value.IsNull() {
+			diags.AddAttributeError(
+				path.Root("clients"),
+				"Null client",
+				"`clients` must not contain a null element.",
+			)
+			break
+		}
+	}
+
+	// The settings rules below are npm rules. On another target the fields are already
+	// reported as misplaced, so re-reporting their contents would only add noise.
+	if targetKnown && target != stepsecurityapi.DeveloperMDMTargetNPM {
+		return diags
+	}
+
+	// Everything below reads the settings map itself, so it waits until the map is known.
+	if !settingsKnown {
+		return diags
+	}
+
+	hasRegistrySetting := false
+	hasScopedRegistrySetting := false
+	for key, element := range model.Settings.Elements() {
+		keyPath := path.Root("settings").AtMapKey(key)
+		if element.IsNull() {
+			diags.AddAttributeError(keyPath, "Null setting value", "A setting value must not be null. Use an empty string instead.")
+			continue
+		}
+		if strings.Trim(key, " \t") != key {
+			diags.AddAttributeError(
+				keyPath,
+				"Setting key is not in canonical form",
+				"The API trims leading and trailing spaces and tabs from setting keys. Remove them so the stored policy matches the configuration.",
+			)
+		}
+		bareRegistry := key == developerMDMNPMRegistrySettingKey
+		scopedRegistry := strings.HasPrefix(key, "@") && strings.HasSuffix(key, ":"+developerMDMNPMRegistrySettingKey)
+		hasRegistrySetting = hasRegistrySetting || bareRegistry
+		hasScopedRegistrySetting = hasScopedRegistrySetting || scopedRegistry
+
+		// The value can be unknown while the key is not; only the value-dependent checks defer.
+		if element.IsUnknown() {
+			continue
+		}
+		value, ok := element.(types.String)
+		if !ok {
+			continue
+		}
+		raw := value.ValueString()
+		// Report the key, never the value: a setting value can hold a credential reference.
+		if strings.Trim(raw, " \t") != raw {
+			diags.AddAttributeError(
+				keyPath,
+				"Setting value is not in canonical form",
+				"The API trims leading and trailing spaces and tabs from setting values. Remove them so the stored policy matches the configuration.",
+			)
+			continue
+		}
+		if bareRegistry || scopedRegistry {
+			if summary, detail := validateNPMRegistryURL(raw); summary != "" {
+				diags.AddAttributeError(keyPath, summary, detail)
+			}
+		}
+	}
+
+	if !selectorKnown {
+		return diags
+	}
+
+	switch selector {
+	case stepsecurityapi.DeveloperMDMRegistryTypeNone:
+		if !hasSettings || (!hasRegistrySetting && !hasScopedRegistrySetting) {
+			diags.AddAttributeError(
+				path.Root("registry_type"),
+				"Settings-only policy needs a registry setting",
+				"`registry_type = \"none\"` selects a settings-only npm policy, so `settings` must define its own "+
+					"`registry` or `@scope:registry` entry. Remove `registry_type` to keep the StepSecurity registry.",
+			)
+		}
+	default:
+		if hasRegistrySetting {
+			diags.AddAttributeError(
+				path.Root("settings").AtMapKey(developerMDMNPMRegistrySettingKey),
+				"Default registry conflicts with the StepSecurity registry",
+				fmt.Sprintf("A bare `registry` setting overrides the %q registry this policy selects. Move it to a scoped "+
+					"`@scope:registry` entry, or set `registry_type = \"none\"` for a settings-only policy.", selector),
+			)
+		}
+	}
+
+	return diags
+}
+
+// developerMDMNPMRegistrySettingKey is the .npmrc key that sets the default registry. It is
+// reserved while the policy also carries a StepSecurity registry, and required (bare or
+// scoped) for a settings-only policy.
+const developerMDMNPMRegistrySettingKey = "registry"
+
+// validateNPMRegistryURL reports why a registry settings value is not in the canonical form
+// the API stores. The API canonicalizes registry URLs, so accepting a non-canonical one here
+// would come back changed and surface as "Provider produced inconsistent result after apply"
+// rather than as a useful diagnostic.
+func validateNPMRegistryURL(raw string) (summary, detail string) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "Invalid registry URL", "The value must be an absolute https URL."
+	}
+	if parsed.User != nil {
+		return "Registry URL must not embed credentials",
+			"Remove the user information from the URL. Authenticate with a separate `//host/path/:_authToken` entry " +
+				"that references an environment variable."
+	}
+	if parsed.Scheme != "https" {
+		return "Registry URL must use https", "The value must start with `https://`."
+	}
+	if parsed.Host == "" {
+		return "Registry URL must include a host", "The value must be an absolute https URL."
+	}
+	if strings.ContainsAny(raw, "?#") {
+		return "Registry URL must not contain a query or fragment", "Remove everything from the first `?` or `#`."
+	}
+	// EscapedPath, not Path: the API canonicalizes the escaped form, so `/my feed/` is
+	// rewritten to `/my%20feed/` server-side and must be rejected here instead.
+	canonical := parsed.Scheme + "://" + strings.ToLower(parsed.Host) + strings.TrimRight(parsed.EscapedPath(), "/") + "/"
+	if canonical != raw {
+		return "Registry URL is not in canonical form",
+			"The API rewrites this URL, which would make the plan inconsistent after apply. Configure it as " +
+				"`https://`, a lowercase host, a percent-encoded path with exactly one trailing slash, and nothing else."
+	}
+	return "", ""
 }
