@@ -166,6 +166,21 @@ type CustomPrecommitConfig struct {
 	UpdateExistingConfiguration bool   `json:"update_existing_configuration"`
 }
 
+// CustomPrecommitConfig is a full .pre-commit-config.yaml provided verbatim.
+// UpdateExistingConfiguration gates overwriting an existing file: false leaves an
+// existing config untouched (only creates when absent); true overwrites it.
+//
+// Neither field carries omitempty. The API stores this object wholesale, so both an
+// empty config and update_existing_configuration=false have to travel as explicit
+// values: with omitempty, turning the flag back off would drop the key and leave the
+// request unable to say "false" at all. Whether the object itself is present is carried
+// by the enclosing pointer, which is where omitempty belongs, since a nil pointer is the
+// only way to express "no custom config configured".
+type CustomPrecommitConfig struct {
+	Config                      string `json:"config"`
+	UpdateExistingConfiguration bool   `json:"update_existing_configuration"`
+}
+
 type featureConfigResponse struct {
 	FullRepoName                string                 `json:"full_repo_name"`
 	PolicyDrivenPRConfiguration policyDrivenPRInternal `json:"policy_driven_pr_configuration"`

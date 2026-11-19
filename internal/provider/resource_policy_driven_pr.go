@@ -766,6 +766,11 @@ type customPrecommitConfigModel struct {
 	UpdateExistingConfiguration types.Bool   `tfsdk:"update_existing_configuration"`
 }
 
+type customPrecommitConfigModel struct {
+	Config                      types.String `tfsdk:"config"`
+	UpdateExistingConfiguration types.Bool   `tfsdk:"update_existing_configuration"`
+}
+
 type ActionsToReplaceModel struct {
 	ActionName         string `tfsdk:"action_name"`
 	StepSecurityAction string `tfsdk:"stepsecurity_action"`
@@ -1229,6 +1234,16 @@ func (r *policyDrivenPRResource) Create(ctx context.Context, req resource.Create
 		}
 	}
 
+	var customPrecommitConfig *stepsecurityapi.CustomPrecommitConfig
+	if !options.CustomPrecommitConfig.IsNull() && !options.CustomPrecommitConfig.IsUnknown() {
+		var cpcModel customPrecommitConfigModel
+		options.CustomPrecommitConfig.As(ctx, &cpcModel, basetypes.ObjectAsOptions{})
+		customPrecommitConfig = &stepsecurityapi.CustomPrecommitConfig{
+			Config:                      cpcModel.Config.ValueString(),
+			UpdateExistingConfiguration: cpcModel.UpdateExistingConfiguration.ValueBool(),
+		}
+	}
+
 	// convert to stepsecurityapi.PolicyDrivenPRPolicy
 	stepSecurityPolicy := stepsecurityapi.PolicyDrivenPRPolicy{
 		Owner: plan.Owner.ValueString(),
@@ -1498,6 +1513,15 @@ func (r *policyDrivenPRResource) Read(ctx context.Context, req resource.ReadRequ
 				SkipHardenRunner:   len(runnerLabels) > 0,
 				RunnerLabels:       runnerLabels,
 				ExemptRunnerLabels: exemptRunnerLabels,
+			}
+		}
+
+		if !currentStateOptions.CustomPrecommitConfig.IsNull() {
+			var cpcModel customPrecommitConfigModel
+			currentStateOptions.CustomPrecommitConfig.As(ctx, &cpcModel, basetypes.ObjectAsOptions{})
+			stepSecurityPolicy.AutoRemdiationOptions.CustomPrecommitConfig = &stepsecurityapi.CustomPrecommitConfig{
+				Config:                      cpcModel.Config.ValueString(),
+				UpdateExistingConfiguration: cpcModel.UpdateExistingConfiguration.ValueBool(),
 			}
 		}
 
@@ -1847,6 +1871,16 @@ func (r *policyDrivenPRResource) Update(ctx context.Context, req resource.Update
 			SkipHardenRunner:   len(runnerLabels) > 0,
 			RunnerLabels:       runnerLabels,
 			ExemptRunnerLabels: exemptRunnerLabels,
+		}
+	}
+
+	var customPrecommitConfigUpdate *stepsecurityapi.CustomPrecommitConfig
+	if !planOptions.CustomPrecommitConfig.IsNull() && !planOptions.CustomPrecommitConfig.IsUnknown() {
+		var cpcModel customPrecommitConfigModel
+		planOptions.CustomPrecommitConfig.As(ctx, &cpcModel, basetypes.ObjectAsOptions{})
+		customPrecommitConfigUpdate = &stepsecurityapi.CustomPrecommitConfig{
+			Config:                      cpcModel.Config.ValueString(),
+			UpdateExistingConfiguration: cpcModel.UpdateExistingConfiguration.ValueBool(),
 		}
 	}
 
